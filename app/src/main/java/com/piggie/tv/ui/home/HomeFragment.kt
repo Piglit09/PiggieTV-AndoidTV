@@ -110,6 +110,15 @@ class HomeFragment : Fragment() {
                         addShelf(pageContent, shelf)
                     }
                 }
+
+                api.loadReadingHomeIncrementally(session) { shelf ->
+                    if (shelf.title == "Continue reading") {
+                        activity?.runOnUiThread {
+                            // Insert Continue Reading at the top after Hero
+                            addShelf(pageContent, shelf, index = 1)
+                        }
+                    }
+                }
             }.onSuccess {
                 activity?.runOnUiThread { loading = false }
             }.onFailure { error ->
@@ -187,10 +196,9 @@ class HomeFragment : Fragment() {
         parent.addView(hero, 0)
     }
 
-    private fun addShelf(parent: LinearLayout, shelf: MediaShelf) {
+    private fun addShelf(parent: LinearLayout, shelf: MediaShelf, index: Int = -1) {
         val context = requireContext()
         val title = label(shelf.title, context.dimFloat(R.dimen.tv_text_size_section_title), R.color.tv_text_primary, true, margin = 20, leftPadding = context.dim(R.dimen.tv_screen_margin_horizontal), isPx = true)
-        parent.addView(title)
         
         val recycler = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
@@ -206,7 +214,18 @@ class HomeFragment : Fragment() {
             MediaCardPresentation.LANDSCAPE -> context.dim(R.dimen.tv_landscape_height) + context.dim(R.dimen.tv_spacing_large) + context.dim(R.dimen.tv_spacing_medium)
             MediaCardPresentation.SQUARE -> context.dim(R.dimen.tv_square_height) + context.dim(R.dimen.tv_spacing_large) + context.dim(R.dimen.tv_spacing_medium)
         }
-        parent.addView(recycler, LinearLayout.LayoutParams(-1, height))
+        
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(title)
+            addView(recycler, LinearLayout.LayoutParams(-1, height))
+        }
+
+        if (index >= 0 && index < parent.childCount) {
+            parent.addView(container, index)
+        } else {
+            parent.addView(container)
+        }
     }
 
     private fun label(value: String, size: Float, color: Int, bold: Boolean = false, margin: Int = 0, leftPadding: Int = 0, isPx: Boolean = false): TextView =
