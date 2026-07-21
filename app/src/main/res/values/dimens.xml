@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Screen Margins (Overscan safety) -->
+    <dimen name="tv_screen_margin_horizontal">60dp</dimen>
+    <dimen name="tv_screen_margin_vertical">28dp</dimen>
+
+    <!-- Shell / Header -->
+    <dimen name="tv_header_logo_width">110dp</dimen>
+    <dimen name="tv_header_logo_height">46dp</dimen>
+    <dimen name="tv_nav_button_width">96dp</dimen>
+    <dimen name="tv_nav_button_height">40dp</dimen>
+    <dimen name="tv_nav_button_spacing">6dp</dimen>
+    <dimen name="tv_nav_text_size">14sp</dimen>
+    <dimen name="tv_profile_button_width">90dp</dimen>
+    <dimen name="tv_profile_button_height">38dp</dimen>
+
+    <!-- Typography -->
+    <dimen name="tv_text_size_page_title">24sp</dimen>
+    <dimen name="tv_text_size_section_title">18sp</dimen>
+    <dimen name="tv_text_size_hero_title">32sp</dimen>
+    <dimen name="tv_text_size_hero_meta">14sp</dimen>
+    <dimen name="tv_text_size_hero_body">16sp</dimen>
+    <dimen name="tv_text_size_body">15sp</dimen>
+    <dimen name="tv_text_size_metadata">13sp</dimen>
+    <dimen name="tv_text_size_card_title">13sp</dimen>
+
+    <!-- Hero -->
+    <dimen name="tv_hero_height">420dp</dimen>
+    <dimen name="tv_hero_content_width">520dp</dimen>
+    <dimen name="tv_hero_logo_max_width">260dp</dimen>
+    <dimen name="tv_hero_logo_max_height">80dp</dimen>
+    <dimen name="tv_hero_button_width">120dp</dimen>
+    <dimen name="tv_hero_button_height">48dp</dimen>
+    <dimen name="tv_hero_button_text_size">15sp</dimen>
+
+    <!-- Cards -->
+    <dimen name="tv_poster_width">140dp</dimen>
+    <dimen name="tv_poster_height">210dp</dimen>
+    <dimen name="tv_landscape_width">240dp</dimen>
+    <dimen name="tv_landscape_height">135dp</dimen>
+    <dimen name="tv_square_width">160dp</dimen>
+    <dimen name="tv_square_height">160dp</dimen>
+    <dimen name="tv_card_padding">6dp</dimen>
+    <dimen name="tv_card_spacing">10dp</dimen>
+
+    <!-- Spacing -->
+    <dimen name="tv_spacing_large">32dp</dimen>
+    <dimen name="tv_spacing_medium">16dp</dimen>
+    <dimen name="tv_spacing_small">8dp</dimen>
+
+    <!-- Player -->
+    <dimen name="tv_mini_player_height">64dp</dimen>
+
+    <!-- Legacy / Compatibility -->
+    <dimen name="login_button_height">48dp</dimen>
+    <dimen name="login_card_width">400dp</dimen>
+    <dimen name="login_card_padding">32dp</dimen>
+</resources>

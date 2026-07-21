@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="card_image" type="id" />
+    <item name="card_title" type="id" />
+    <item name="card_progress" type="id" />
+    <item name="card_subtitle" type="id" />
+
+    <item name="player_view" type="id" />
+    <item name="player_title" type="id" />
+    <item name="player_subtitle" type="id" />
+</resources>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tv_bg_start">#1A0A2E</color>
+    <color name="tv_bg_mid">#140725</color>
+    <color name="tv_bg_end">#0F041C</color>
+
+    <color name="tv_text_primary">#FFFFFF</color>
+    <color name="tv_text_secondary">#BBBBBB</color>
+    <color name="tv_text_muted">#777777</color>
+
+    <color name="tv_focus_ring">#00F2FF</color>
+
+    <color name="tv_button">#8E44AD</color>
+    <color name="tv_button_hover">#9B59B6</color>
+    <color name="tv_button_focused">#8E44AD</color>
+    <color name="tv_button_pressed">#6C3483</color>
+    <color name="tv_button_disabled">#444444</color>
+
+    <color name="tv_panel_bg">#221136</color>
+    <color name="tv_panel_bg_fallback">#331A4D</color>
+    <color name="tv_panel_border">#442266</color>
+
+    <color name="ic_launcher_background">#0F041C</color>
+</resources>

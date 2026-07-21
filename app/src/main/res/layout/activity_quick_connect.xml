@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/tv_login_backdrop"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
+
+        <ImageView
+            android:layout_width="260dp"
+            android:layout_height="62dp"
+            android:contentDescription="@string/app_name"
+            android:scaleType="fitCenter"
+            android:src="@drawable/app_logo" />
+
+        <LinearLayout
+            android:layout_width="@dimen/login_card_width"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/tv_panel_background"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="@dimen/login_card_padding">
+
+            <TextView
+                android:id="@+id/quick_connect_server"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:textColor="@color/tv_text_muted"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="@string/native_login_quick_connect_code_label"
+                android:textColor="@color/tv_text_secondary"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/quick_connect_code"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="6dp"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:letterSpacing="0.14"
+                android:textColor="@color/tv_text_primary"
+                android:textSize="36sp" />
+
+            <TextView
+                android:id="@+id/quick_connect_status"
+                android:layout_width="match_parent"
+                android:layout_height="30dp"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:textColor="@color/tv_text_secondary"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/quick_connect_generate_button"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/tv_button_primary"
+                android:nextFocusDown="@id/quick_connect_cancel_button"
+                android:text="@string/native_login_quick_connect_generate"
+                android:textAllCaps="false"
+                android:textColor="@color/tv_text_primary"
+                android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/quick_connect_cancel_button"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/tv_button_secondary"
+                android:nextFocusDown="@id/quick_connect_cancel_button"
+                android:nextFocusUp="@id/quick_connect_generate_button"
+                android:text="@string/native_login_quick_connect_cancel"
+                android:textAllCaps="false"
+                android:textColor="@color/tv_text_primary"
+                android:textSize="18sp" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
