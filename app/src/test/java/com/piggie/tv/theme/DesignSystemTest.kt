@@ -1,6 +1,7 @@
 package com.piggie.tv.theme
 
 import android.graphics.Color
+import android.view.View
 import android.widget.TextView
 import org.junit.Assert.*
 import org.junit.Test
@@ -32,9 +33,18 @@ class DesignSystemTest {
     }
     
     @Test
-    fun testShapeScaleLogic() {
-        val focused = true
-        val scale = if (focused) 1.05f else 1.0f
-        assertEquals(1.05f, scale)
+    fun focusEffectIsBorderOnlyAndResetsTransformCost() {
+        val context = RuntimeEnvironment.getApplication()
+        val view = View(context).apply {
+            scaleX = 1.05f
+            scaleY = 1.05f
+            elevation = 12f
+        }
+
+        PTVShapes.applyFocusEffect(view, focused = true)
+
+        assertEquals(1f, view.scaleX)
+        assertEquals(1f, view.scaleY)
+        assertEquals(0f, view.elevation)
     }
 }

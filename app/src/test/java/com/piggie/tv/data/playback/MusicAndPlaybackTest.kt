@@ -36,11 +36,11 @@ class MusicAndPlaybackTest {
         val context = RuntimeEnvironment.getApplication()
         val settings = NativeSettings(context)
         
-        settings.playbackQuality = "720p (4 Mbps)"
+        settings.connectionSpeed = "5 Mbps"
         settings.subtitlePreference = "Always On"
         
         val newSettings = NativeSettings(context)
-        assertEquals("720p (4 Mbps)", newSettings.playbackQuality)
+        assertEquals("5 Mbps", newSettings.connectionSpeed)
         assertEquals("Always On", newSettings.subtitlePreference)
     }
 
@@ -138,9 +138,9 @@ class MusicAndPlaybackTest {
 
     @Test
     fun testImageSizingMaxWidth() {
-        assertEquals(480, ImageSizing.maxWidth(MediaCardPresentation.POSTER))
-        assertEquals(640, ImageSizing.maxWidth(MediaCardPresentation.LANDSCAPE))
-        assertEquals(420, ImageSizing.maxWidth(MediaCardPresentation.SQUARE))
+        assertEquals(240, ImageSizing.maxWidth(MediaCardPresentation.POSTER))
+        assertEquals(400, ImageSizing.maxWidth(MediaCardPresentation.LANDSCAPE))
+        assertEquals(240, ImageSizing.maxWidth(MediaCardPresentation.SQUARE))
     }
 
     @Test

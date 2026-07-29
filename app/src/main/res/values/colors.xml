@@ -8,7 +8,7 @@
     <color name="tv_text_secondary">#BBBBBB</color>
     <color name="tv_text_muted">#777777</color>
 
-    <color name="tv_focus_ring">#00F2FF</color>
+    <color name="tv_focus_ring">#FFFFFF</color>
 
     <color name="tv_button">#8E44AD</color>
     <color name="tv_button_hover">#9B59B6</color>

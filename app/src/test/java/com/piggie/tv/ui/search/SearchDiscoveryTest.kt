@@ -1,7 +1,10 @@
 package com.piggie.tv.ui.search
 
 import com.piggie.tv.data.models.MediaItem
-import org.junit.Assert.*
+import com.piggie.tv.data.models.MediaCardPresentation
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SearchDiscoveryTest {
@@ -12,30 +15,61 @@ class SearchDiscoveryTest {
     )
 
     @Test
-    fun testResultGroupingByType() {
+    fun booksAndUnknownTypesAreExcludedFromTvSearch() {
         val results = listOf(
             mockItem("1", "Movie"),
             mockItem("2", "Book"),
             mockItem("3", "Movie"),
-            mockItem("4", "Person")
+            mockItem("4", "Person"),
+            mockItem("5", "Unsupported")
         )
-        
-        val grouped = results.groupBy { it.type }
-        assertEquals(2, grouped["Movie"]?.size)
-        assertEquals(1, grouped["Book"]?.size)
-        assertEquals(1, grouped["Person"]?.size)
+
+        val shelves = SearchResultPolicy.shelves(results)
+
+        assertEquals(listOf("Movies", "People"), shelves.map { it.title })
+        assertEquals(listOf("1", "3", "4"), shelves.flatMap { it.items }.map { it.id })
+        assertFalse(shelves.flatMap { it.items }.any { it.type == "Book" })
     }
 
     @Test
-    fun testEmptyResultsHandling() {
-        val results = emptyList<MediaItem>()
-        val grouped = results.groupBy { it.type }
-        assertTrue(grouped.isEmpty())
+    fun groupsUseStableOrderTitlesAndPresentations() {
+        val results = listOf(
+            mockItem("person", "Person"),
+            mockItem("song", "Audio"),
+            mockItem("album", "MusicAlbum"),
+            mockItem("artist", "MusicArtist"),
+            mockItem("series", "Series"),
+            mockItem("movie", "Movie")
+        )
+
+        val shelves = SearchResultPolicy.shelves(results)
+
+        assertEquals(
+            listOf("Movies", "Series", "Artists", "Albums", "Songs", "People"),
+            shelves.map { it.title }
+        )
+        assertEquals(
+            listOf(
+                MediaCardPresentation.POSTER,
+                MediaCardPresentation.POSTER,
+                MediaCardPresentation.SQUARE,
+                MediaCardPresentation.LANDSCAPE,
+                MediaCardPresentation.LANDSCAPE,
+                MediaCardPresentation.SQUARE
+            ),
+            shelves.map { it.presentation }
+        )
     }
 
     @Test
-    fun testSearchQueryParsing() {
-        val query = "  Batman  "
-        assertEquals("Batman", query.trim())
+    fun unsupportedOnlyResultsProduceNoShelves() {
+        assertTrue(SearchResultPolicy.shelves(listOf(mockItem("book", "Book"))).isEmpty())
+    }
+
+    @Test
+    fun queryAndCompactSafeMarginAreCanonical() {
+        assertEquals("Batman", SearchResultPolicy.normalizeQuery("  Batman  "))
+        assertEquals(20, SearchResultPolicy.COMPACT_HORIZONTAL_SAFE_MARGIN_DP)
+        assertEquals(40, SearchResultPolicy.compactSafeMarginPx(density = 2f))
     }
 }

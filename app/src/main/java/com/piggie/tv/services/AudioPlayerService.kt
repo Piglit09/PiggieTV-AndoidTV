@@ -12,7 +12,12 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.playback.PlaybackOriginPolicy
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.diagnostics.PtvAudioTrace
+import com.piggie.tv.diagnostics.PtvDiagnosticsManager
+
+private const val AUDIO_MEDIA_SESSION_ID = "ptv-audio-session"
 
 @OptIn(UnstableApi::class)
 class AudioPlayerService : MediaSessionService() {
@@ -25,15 +30,30 @@ class AudioPlayerService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_created", serviceState = "created"))
         
-        val session = store.read()
         val client = okhttp3.OkHttpClient.Builder()
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .addHeader("Authorization", api.authorization(session?.token))
-                    .addHeader("X-Emby-Authorization", api.authorization(session?.token))
-                    .addHeader("X-MediaBrowser-Token", session?.token ?: "")
-                    .build()
+            .addNetworkInterceptor { chain ->
+                val original = chain.request()
+                val requestBuilder = original.newBuilder()
+                    .removeHeader("Authorization")
+                    .removeHeader("X-Emby-Authorization")
+                    .removeHeader("X-MediaBrowser-Token")
+                val session = store.read()
+                if (
+                    session != null &&
+                    PlaybackOriginPolicy.shouldAttachCredentials(
+                        session.serverUrl,
+                        original.url.toString()
+                    )
+                ) {
+                    val authorization = api.authorization(session.token)
+                    requestBuilder
+                        .header("Authorization", authorization)
+                        .header("X-Emby-Authorization", authorization)
+                        .header("X-MediaBrowser-Token", session.token)
+                }
+                val request = requestBuilder.build()
                 chain.proceed(request)
             }
             .build()
@@ -56,13 +76,16 @@ class AudioPlayerService : MediaSessionService() {
             .apply {
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_play_state", serviceState = "running", mediaSessionState = if (isPlaying) "playing" else "paused"))
                         if (isPlaying) startReporting() else stopReporting()
                     }
                     override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                        PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_track_transition", currentIndex = this@AudioPlayerService.player.currentMediaItemIndex))
                         if (mediaItem != null) reportItemStart(mediaItem.mediaId)
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("AudioPlayer", "ExoPlayer Error: ${error.message}", error)
+                        PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_player_error", error = error.errorCodeName))
                     }
                 })
             }
@@ -76,6 +99,7 @@ class AudioPlayerService : MediaSessionService() {
         )
 
         mediaSession = MediaSession.Builder(this, player)
+            .setId(AUDIO_MEDIA_SESSION_ID)
             .setSessionActivity(pendingIntent)
             .build()
     }
@@ -108,6 +132,7 @@ class AudioPlayerService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
     override fun onDestroy() {
+        PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_destroyed", serviceState = "destroyed"))
         val lastItemId = player.currentMediaItem?.mediaId
         val lastPos = player.currentPosition
         mediaSession?.run {

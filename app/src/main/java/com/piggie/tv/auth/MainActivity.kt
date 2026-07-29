@@ -12,6 +12,10 @@ import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.api.SessionOrigin
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.ui.rendering.TvRenderingRuntime
+import com.piggie.tv.data.session.NativeSettings
+import com.piggie.tv.diagnostics.DiagnosticsExperiment
+import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
@@ -20,7 +24,28 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+        com.piggie.tv.util.CrashReporter.init(this)
+        TvRenderingRuntime.configureDebugExperiment(
+            intent.getStringExtra(TvRenderingRuntime.DEBUG_EXPERIMENT_EXTRA)
+        )
+        if (com.piggie.tv.BuildConfig.DEBUG) {
+            when (DiagnosticsExperiment.fromWireName(intent.getStringExtra(DiagnosticsExperiment.DEBUG_EXTRA))) {
+                DiagnosticsExperiment.AUTO -> Unit
+                DiagnosticsExperiment.DISABLED -> {
+                    PtvDiagnosticsManager.setEnabled(this, false)
+                    NativeSettings(this).diagnosticsOverlayEnabled = false
+                }
+                DiagnosticsExperiment.ENABLED_NO_OVERLAY -> {
+                    PtvDiagnosticsManager.setEnabled(this, true)
+                    NativeSettings(this).diagnosticsOverlayEnabled = false
+                }
+                DiagnosticsExperiment.FULL -> {
+                    PtvDiagnosticsManager.setEnabled(this, true)
+                    NativeSettings(this).diagnosticsOverlayEnabled = true
+                }
+            }
+        }
+
         val saved = store.read()
         if (saved != null && saved.isComplete()) {
             startActivity(Intent(this, PtvHostActivity::class.java))
@@ -33,11 +58,15 @@ class MainActivity : AppCompatActivity() {
         val serverInput = findViewById<EditText>(R.id.server_input)
         val userAction = findViewById<Button>(R.id.shell_launch_button)
         val quickConnectAction = findViewById<Button>(R.id.quick_connect_button)
-        val serverDisplay = findViewById<TextView>(R.id.native_login_server)
+
+        val lastServer = getSharedPreferences("ptv_auth", MODE_PRIVATE).getString("last_server", "")
+        if (!lastServer.isNullOrBlank()) {
+            serverInput.setText(lastServer)
+        }
 
         userAction.setOnClickListener {
-            val server = serverInput.text.toString()
-            val user = findViewById<EditText>(R.id.username_input).text.toString()
+            val server = serverInput.text.toString().trim()
+            val user = findViewById<EditText>(R.id.username_input).text.toString().trim()
             val pass = findViewById<EditText>(R.id.password_input).text.toString()
             
             if (server.isBlank() || user.isBlank()) {
@@ -45,9 +74,12 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
+            getSharedPreferences("ptv_auth", MODE_PRIVATE).edit().putString("last_server", server).apply()
+
             thread {
                 runCatching {
-                    val session = api.authenticateWithPassword(server, user, pass)
+                    val normalized = com.piggie.tv.util.JellyfinServerUrl.normalize(server)
+                    val session = api.authenticateWithPassword(normalized, user, pass)
                     store.save(session, SessionOrigin.PASSWORD)
                     runOnUiThread {
                         startActivity(Intent(this@MainActivity, PtvHostActivity::class.java))
@@ -60,13 +92,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         quickConnectAction.setOnClickListener {
-            val server = serverInput.text.toString()
+            val server = serverInput.text.toString().trim()
             if (server.isBlank()) {
                 Toast.makeText(this, "Enter server URL first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            getSharedPreferences("ptv_auth", MODE_PRIVATE).edit().putString("last_server", server).apply()
+            val normalized = com.piggie.tv.util.JellyfinServerUrl.normalize(server)
             startActivity(Intent(this, QuickConnectActivity::class.java).apply {
-                putExtra("server", server)
+                putExtra("server", normalized)
             })
         }
     }

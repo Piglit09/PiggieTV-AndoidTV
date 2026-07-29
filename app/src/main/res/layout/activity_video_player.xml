@@ -12,4 +12,20 @@
         app:use_controller="true"
         app:controller_layout_id="@layout/tv_player_controls" />
 
+    <TextView
+        android:id="@+id/player_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:maxWidth="420dp"
+        android:gravity="center"
+        android:padding="16dp"
+        android:background="@drawable/tv_panel_background"
+        android:text="Loading video…"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

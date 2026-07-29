@@ -17,6 +17,7 @@ import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.theme.PTVShapes
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import com.piggie.tv.util.sp
@@ -84,7 +85,7 @@ class NowPlayingActivity : AppCompatActivity() {
                     val session = store.read()!!
                     val api = JellyfinNativeApi(this@NowPlayingActivity)
                     art.load(api.imageUrl(session, item, MediaCardPresentation.SQUARE)) {
-                        crossfade(true)
+                        crossfade(false)
                         placeholder(ColorDrawable(0xFF1A0A33.toInt()))
                     }
                 } else {
@@ -106,7 +107,7 @@ class NowPlayingActivity : AppCompatActivity() {
         setOnClickListener { onClick() }
         isFocusable = true
         setOnFocusChangeListener { view, focused ->
-            view.animate().scaleX(if (focused) 1.05f else 1f).scaleY(if (focused) 1.05f else 1f).start()
+            PTVShapes.applyFocusEffect(view, focused)
         }
     }
 

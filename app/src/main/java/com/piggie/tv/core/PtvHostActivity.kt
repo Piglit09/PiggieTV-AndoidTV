@@ -1,29 +1,46 @@
 package com.piggie.tv.core
 
+import android.annotation.SuppressLint
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.os.Trace
+import android.util.Log
 import android.view.KeyEvent
+import android.graphics.Rect
+import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import androidx.lifecycle.Lifecycle
 import com.piggie.tv.R
 import com.piggie.tv.auth.MainActivity
 import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.navigation.NativePtvShell
 import com.piggie.tv.navigation.NativeRoute
 import com.piggie.tv.navigation.NativeRouteNavigator
+import com.piggie.tv.ui.hero.HeroRefreshableRoute
 import com.piggie.tv.ui.home.HomeFragment
 import com.piggie.tv.ui.movies.MoviesFragment
 import com.piggie.tv.ui.music.MusicFragment
 import com.piggie.tv.ui.profile.ProfileFragment
-import com.piggie.tv.ui.reading.ReadingFragment
-import com.piggie.tv.ui.reading.PlaceholderFragment
 import com.piggie.tv.ui.search.SearchFragment
 import com.piggie.tv.ui.settings.SettingsFragment
 import com.piggie.tv.ui.shows.ShowsFragment
+import com.piggie.tv.ui.player.MediaDetailsFragment
+import com.piggie.tv.ui.player.MediaDetailsSeedStore
+import com.piggie.tv.data.session.NativeSettings
+import com.piggie.tv.diagnostics.PerformanceMonitor
+import com.piggie.tv.diagnostics.PtvDiagnosticsManager
+import com.piggie.tv.diagnostics.PtvFocusTrace
+import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.lang.ref.WeakReference
 
 class PtvHostActivity : AppCompatActivity() {
     private val store by lazy { SecureSessionStore(this) }
@@ -31,12 +48,27 @@ class PtvHostActivity : AppCompatActivity() {
     private lateinit var contentFrame: FrameLayout
     private var navigation = emptyMap<NativeRoute, Button>()
     private var currentRoute = NativeRoute.HOME
+    private val routeFragments = LinkedHashMap<NativeRoute, Fragment>(ROUTE_CACHE_SIZE, 0.75f, true)
+    private var visibleFragment: Fragment? = null
+    private var detailsFragment: Fragment? = null
+    private var focusBeforeDetails: WeakReference<View>? = null
+    private var detailsTraceCookie = NO_TRACE
+    private var detailsRequestedAtMs = 0L
+    private val traceSequence = AtomicInteger()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
         session = store.read() ?: run {
+            super.onCreate(savedInstanceState)
             returnToLogin()
             return
+        }
+        // FragmentActivity restores retained fragments from super.onCreate(). They can create
+        // their views synchronously and read the host session, so the session must exist first.
+        super.onCreate(savedInstanceState)
+
+        if (savedInstanceState != null) {
+            val restoredRoute = savedInstanceState.getString("current_route", NativeRoute.HOME.name)
+            currentRoute = NativeRouteNavigator.restoreTarget(restoredRoute)
         }
         
         MusicPlaybackManager.init(this)
@@ -44,10 +76,37 @@ class PtvHostActivity : AppCompatActivity() {
         val shell = NativePtvShell.create(this, currentRoute, ::showRoute)
         contentFrame = shell.content
         navigation = shell.navigation
+        restoreCachedFragments()
+        supportFragmentManager.registerFragmentLifecycleCallbacks(
+            object : FragmentManager.FragmentLifecycleCallbacks() {
+                override fun onFragmentViewCreated(
+                    fm: FragmentManager,
+                    fragment: Fragment,
+                    view: View,
+                    savedInstanceState: Bundle?
+                ) {
+                    if (!PtvDiagnosticsManager.isEnabled()) return
+                    val route = currentRoute.name.lowercase()
+                    PtvDiagnosticsManager.routeFirstContent(route)
+                    view.post { PtvDiagnosticsManager.routeInteractive(route, describeFocus(currentFocus)) }
+                }
+            },
+            false
+        )
         
-        if (savedInstanceState == null) {
-            showRoute(NativeRoute.HOME)
+        if (savedInstanceState == null || visibleFragment?.tag != routeTag(currentRoute)) {
+            showRoute(currentRoute)
+        } else {
+            // Restore selection state for navigation buttons
+            navigation.forEach { (route, button) -> button.isSelected = route == currentRoute }
         }
+
+        PerformanceMonitor.setVisible(this, NativeSettings(this).diagnosticsOverlayEnabled)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("current_route", currentRoute.name)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -70,6 +129,7 @@ class PtvHostActivity : AppCompatActivity() {
     }
 
     private fun handleBack(): Boolean {
+        if (closeDetails()) return true
         val target = NativeRouteNavigator.backTarget(currentRoute) ?: return false
         showRoute(target)
         navigation[target]?.requestFocus()
@@ -77,31 +137,252 @@ class PtvHostActivity : AppCompatActivity() {
     }
 
     fun showRoute(target: NativeRoute) {
-        if (currentRoute == target && supportFragmentManager.findFragmentById(contentFrame.id) != null) {
+        val visible = visibleFragment
+        if (NativeRouteNavigator.canRefreshVisibleRoute(
+                current = currentRoute,
+                target = target,
+                detailsOpen = detailsFragment != null,
+                visibleFragmentPresent = visible != null,
+                visibleTagMatches = visible?.tag == routeTag(target),
+                cachedFragmentMatchesVisible =
+                    visible != null && routeFragments[target] === visible
+            )
+        ) {
+            (visibleFragment as? HeroRefreshableRoute)?.refreshHero()
             navigation[target]?.requestFocus()
             return
         }
-        
+
+        Trace.beginSection("PtvHostActivity#showRoute")
+        try {
+            showRouteInternal(target)
+        } finally {
+            Trace.endSection()
+        }
+    }
+
+    private fun showRouteInternal(target: NativeRoute) {
+        val routeRequestedAtMs = android.os.SystemClock.elapsedRealtime()
+        val route = target.name.lowercase()
+        val routeTrace = beginAsyncTrace("PiggieTV#route:$route")
         currentRoute = target
-        navigation.forEach { (route, button) -> button.isSelected = route == target }
-        
-        val fragment: Fragment = when (target) {
-            NativeRoute.HOME -> HomeFragment()
-            NativeRoute.MOVIES -> MoviesFragment()
-            NativeRoute.SHOWS -> ShowsFragment()
-            NativeRoute.MUSIC -> MusicFragment()
-            NativeRoute.SEARCH -> SearchFragment()
-            NativeRoute.SETTINGS -> SettingsFragment()
-            NativeRoute.PROFILE -> ProfileFragment()
-            NativeRoute.READING -> ReadingFragment()
+        PtvDiagnosticsManager.routeRequested(route)
+        navigation.forEach { (navRoute, button) -> button.isSelected = navRoute == target }
+
+        val fragment = routeFragments[target]
+            ?: supportFragmentManager.findFragmentByTag(routeTag(target))
+            ?: createRouteFragment(target)
+        routeFragments[target] = fragment
+
+        val transaction = supportFragmentManager.beginTransaction().setReorderingAllowed(true)
+        detailsFragment?.takeIf { it.isAdded }?.let(transaction::remove)
+        detailsFragment = null
+        endDetailsTrace()
+        visibleFragment?.takeIf { it !== fragment && it.isAdded }?.let {
+            if (it.tag?.startsWith(ROUTE_TAG_PREFIX) == true && !isRegisteredRouteFragment(it)) {
+                transaction.remove(it)
+            } else {
+                transaction.hide(it).setMaxLifecycle(it, Lifecycle.State.STARTED)
+            }
+        }
+        if (fragment.isAdded) {
+            transaction.show(fragment).setMaxLifecycle(fragment, Lifecycle.State.RESUMED)
+        } else {
+            transaction.add(contentFrame.id, fragment, routeTag(target))
+            transaction.setMaxLifecycle(fragment, Lifecycle.State.RESUMED)
+        }
+        transaction.setPrimaryNavigationFragment(fragment)
+
+        while (routeFragments.size > ROUTE_CACHE_SIZE) {
+            val routeToEvict = routeFragments.keys.firstOrNull { it != target } ?: break
+            val fragmentToEvict = routeFragments.remove(routeToEvict)
+            if (fragmentToEvict != null && fragmentToEvict.isAdded && fragmentToEvict !== fragment) {
+                transaction.remove(fragmentToEvict)
+            }
         }
 
-        supportFragmentManager.beginTransaction()
-            .setCustomAnimations(android.R.anim.fade_in, android.R.anim.fade_out)
-            .replace(contentFrame.id, fragment)
-            .commit()
+        visibleFragment = fragment
+        transaction.runOnCommit {
+            val diagnostics = PtvDiagnosticsManager.isEnabled()
+            if (diagnostics) PtvDiagnosticsManager.routeVisible(route, describeFocus(currentFocus))
+            contentFrame.postOnAnimation {
+                if (diagnostics) PtvDiagnosticsManager.routeInteractive(route, describeFocus(currentFocus))
+                Log.i(
+                    PERFORMANCE_TAG,
+                    "route=$route interactiveMs=" +
+                        (android.os.SystemClock.elapsedRealtime() - routeRequestedAtMs)
+                )
+                endAsyncTrace("PiggieTV#route:$route", routeTrace)
+            }
+        }.commit()
 
         if (currentFocus == null) navigation[target]?.requestFocus()
+    }
+
+    private fun createRouteFragment(target: NativeRoute): Fragment = when (target) {
+        NativeRoute.HOME -> HomeFragment()
+        NativeRoute.MOVIES -> MoviesFragment()
+        NativeRoute.SHOWS -> ShowsFragment()
+        NativeRoute.MUSIC -> MusicFragment()
+        NativeRoute.SEARCH -> SearchFragment()
+        NativeRoute.SETTINGS -> SettingsFragment()
+        NativeRoute.PROFILE -> ProfileFragment()
+    }
+
+    private fun restoreCachedFragments() {
+        detailsFragment = supportFragmentManager.findFragmentByTag(DETAILS_TAG)
+        visibleFragment = supportFragmentManager.findFragmentByTag(routeTag(currentRoute))
+            ?: supportFragmentManager.fragments.lastOrNull { it !== detailsFragment }
+        NativeRoute.entries.forEach { route ->
+            supportFragmentManager.findFragmentByTag(routeTag(route))?.let { routeFragments[route] = it }
+        }
+        if (
+            visibleFragment?.tag == routeTag(currentRoute) &&
+            routeFragments[currentRoute] == null
+        ) {
+            routeFragments[currentRoute] = visibleFragment!!
+        }
+    }
+
+    private fun routeTag(route: NativeRoute) = "$ROUTE_TAG_PREFIX${route.name.lowercase()}"
+
+    private fun isRegisteredRouteFragment(fragment: Fragment): Boolean =
+        NativeRoute.entries.any { routeTag(it) == fragment.tag }
+
+    fun showDetails(item: MediaItem) {
+        MediaDetailsSeedStore.put(item)
+        val existing = detailsFragment
+        if (existing != null) return
+
+        focusBeforeDetails = WeakReference(currentFocus)
+        detailsRequestedAtMs = android.os.SystemClock.elapsedRealtime()
+        detailsTraceCookie = beginAsyncTrace("PiggieTV#details:firstInteractive")
+        val fragment = MediaDetailsFragment.newInstance(item.id)
+        detailsFragment = fragment
+
+        supportFragmentManager.beginTransaction()
+            .setReorderingAllowed(true)
+            .apply {
+                visibleFragment?.takeIf { it.isAdded }?.let {
+                    hide(it).setMaxLifecycle(it, Lifecycle.State.STARTED)
+                }
+                add(contentFrame.id, fragment, DETAILS_TAG)
+                setMaxLifecycle(fragment, Lifecycle.State.RESUMED)
+                setPrimaryNavigationFragment(fragment)
+            }
+            .commit()
+    }
+
+    fun onDetailsInteractive(interactiveAtMs: Long) {
+        if (detailsFragment == null) return
+        val elapsed = interactiveAtMs - detailsRequestedAtMs
+        Log.i(PERFORMANCE_TAG, "details interactiveMs=$elapsed")
+        Trace.beginSection("PiggieTV#details:firstInteractive:${elapsed}ms")
+        Trace.endSection()
+        endDetailsTrace()
+    }
+
+    private fun closeDetails(): Boolean {
+        val fragment = detailsFragment ?: return false
+        if ((fragment as? MediaDetailsFragment)?.handleBackWithinDetails() == true) {
+            return true
+        }
+        val closeRequestedAtMs = android.os.SystemClock.elapsedRealtime()
+        detailsFragment = null
+        endDetailsTrace()
+        val route = visibleFragment
+        supportFragmentManager.beginTransaction()
+            .setReorderingAllowed(true)
+            .remove(fragment)
+            .apply {
+                route?.takeIf { it.isAdded }?.let {
+                    show(it).setMaxLifecycle(it, Lifecycle.State.RESUMED)
+                    setPrimaryNavigationFragment(it)
+                }
+            }
+            .runOnCommit {
+                focusBeforeDetails?.get()?.takeIf { it.isAttachedToWindow }?.requestFocus()
+                focusBeforeDetails = null
+            }
+            .commitNow()
+        Log.i(
+            PERFORMANCE_TAG,
+            "details returnMs=${android.os.SystemClock.elapsedRealtime() - closeRequestedAtMs}"
+        )
+        return true
+    }
+
+    private fun endDetailsTrace() {
+        if (detailsTraceCookie != NO_TRACE) {
+            endAsyncTrace("PiggieTV#details:firstInteractive", detailsTraceCookie)
+            detailsTraceCookie = NO_TRACE
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val trackedKey = event.action == KeyEvent.ACTION_DOWN && event.keyCode in TRACKED_DPAD_KEYS
+        val diagnostics = trackedKey && PtvDiagnosticsManager.isEnabled()
+        val traceEnabled = trackedKey && isSystemTraceEnabled()
+        val tracked = diagnostics || traceEnabled
+        val previous = if (diagnostics) describeFocus(currentFocus) else null
+        val traceName = if (tracked) "PiggieTV#input:${KeyEvent.keyCodeToString(event.keyCode)}" else ""
+        val inputTrace = if (tracked) beginAsyncTrace(traceName) else NO_TRACE
+        val handled = super.dispatchKeyEvent(event)
+        if (tracked) {
+            window.decorView.postOnAnimation {
+                if (diagnostics) {
+                    val resulting = describeFocus(currentFocus)
+                    PtvDiagnosticsManager.recordFocus(
+                        PtvFocusTrace(
+                            route = currentRoute.name.lowercase(),
+                            direction = KeyEvent.keyCodeToString(event.keyCode),
+                            previousFocus = previous,
+                            resultingFocus = resulting,
+                            resultingBounds = focusBounds(currentFocus),
+                            failure = when {
+                                resulting == null -> "no focus owner"
+                                resulting == previous && event.keyCode != KeyEvent.KEYCODE_DPAD_CENTER -> "focus did not move"
+                                currentFocus?.visibility != View.VISIBLE -> "focused view is not visible"
+                                else -> null
+                            }
+                        )
+                    )
+                }
+                endAsyncTrace(traceName, inputTrace)
+            }
+        }
+        return handled
+    }
+
+    @SuppressLint("NewApi") // Guarded by isSystemTraceEnabled(), which requires API 29.
+    private fun beginAsyncTrace(name: String): Int {
+        if (!isSystemTraceEnabled()) return NO_TRACE
+        val cookie = traceSequence.incrementAndGet()
+        Trace.beginAsyncSection(name, cookie)
+        return cookie
+    }
+
+    private fun isSystemTraceEnabled() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && Trace.isEnabled()
+
+    @SuppressLint("NewApi") // A non-sentinel cookie can only be created on API 29+.
+    private fun endAsyncTrace(name: String, cookie: Int) {
+        if (cookie != NO_TRACE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Trace.endAsyncSection(name, cookie)
+        }
+    }
+
+    private fun describeFocus(view: View?): String? {
+        view ?: return null
+        val id = view.id.takeIf { it != View.NO_ID }?.let { idValue ->
+            runCatching { resources.getResourceEntryName(idValue) }.getOrNull()
+        }
+        return (id ?: view.javaClass.simpleName) + if (view.contentDescription != null) ":${view.contentDescription}" else ""
+    }
+
+    private fun focusBounds(view: View?): String? {
+        view ?: return null
+        val rect = Rect()
+        return if (view.getGlobalVisibleRect(rect)) "${rect.left},${rect.top},${rect.right},${rect.bottom}" else "not-visible"
     }
 
     private fun returnToLogin() {
@@ -109,5 +390,22 @@ class PtvHostActivity : AppCompatActivity() {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
         })
         finish()
+    }
+
+    companion object {
+        // Vertically virtualized discovery pages retain only visible/near-visible shelves.
+        // Keeping the previous route avoids reconstructing those shelves during TV round trips.
+        private const val ROUTE_CACHE_SIZE = 2
+        private const val ROUTE_TAG_PREFIX = "ptv-route-"
+        private const val DETAILS_TAG = "ptv-details"
+        private const val NO_TRACE = -1
+        private const val PERFORMANCE_TAG = "PtvPerformance"
+        private val TRACKED_DPAD_KEYS = setOf(
+            KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_CENTER
+        )
     }
 }

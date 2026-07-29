@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TV_STANDARD: logical TV canvases larger than the 960x540 compact baseline. -->
+    <dimen name="tv_screen_margin_horizontal">48dp</dimen>
+    <dimen name="tv_header_logo_width">88dp</dimen>
+    <dimen name="tv_header_logo_height">37dp</dimen>
+    <dimen name="tv_nav_button_width">84dp</dimen>
+    <dimen name="tv_nav_button_height">36dp</dimen>
+    <dimen name="tv_poster_width">116dp</dimen>
+    <dimen name="tv_poster_height">174dp</dimen>
+    <dimen name="tv_landscape_width">216dp</dimen>
+    <dimen name="tv_landscape_height">122dp</dimen>
+    <dimen name="tv_square_width">132dp</dimen>
+    <dimen name="tv_square_height">132dp</dimen>
+    <dimen name="tv_hero_height">300dp</dimen>
+    <dimen name="tv_hero_logo_max_height">60dp</dimen>
+    <dimen name="tv_catalog_grid_height">440dp</dimen>
+</resources>

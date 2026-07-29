@@ -7,8 +7,8 @@ class RouteValidationTest {
 
     @Test
     fun testRouteLabels() {
-        assertEquals("Reading", NativeRoute.READING.label)
         assertEquals("Search", NativeRoute.SEARCH.label)
+        assertFalse(NativeRoute.entries.any { it.name == "READING" || it.label == "Reading" })
     }
 
     @Test
@@ -21,5 +21,36 @@ class RouteValidationTest {
                 assertEquals(NativeRoute.HOME, target)
             }
         }
+    }
+
+    @Test
+    fun removedOrUnknownSavedRoutesRestoreHome() {
+        assertEquals(NativeRoute.HOME, NativeRouteNavigator.restoreTarget("READING"))
+        assertEquals(NativeRoute.HOME, NativeRouteNavigator.restoreTarget("UNKNOWN"))
+        assertEquals(NativeRoute.SEARCH, NativeRouteNavigator.restoreTarget("SEARCH"))
+    }
+
+    @Test
+    fun coldStartNeverTreatsTwoMissingFragmentsAsAnExistingRoute() {
+        assertFalse(
+            NativeRouteNavigator.canRefreshVisibleRoute(
+                current = NativeRoute.HOME,
+                target = NativeRoute.HOME,
+                detailsOpen = false,
+                visibleFragmentPresent = false,
+                visibleTagMatches = false,
+                cachedFragmentMatchesVisible = true
+            )
+        )
+        assertTrue(
+            NativeRouteNavigator.canRefreshVisibleRoute(
+                current = NativeRoute.HOME,
+                target = NativeRoute.HOME,
+                detailsOpen = false,
+                visibleFragmentPresent = true,
+                visibleTagMatches = true,
+                cachedFragmentMatchesVisible = false
+            )
+        )
     }
 }

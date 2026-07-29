@@ -29,8 +29,8 @@ class MediaPresentationTest {
 
     @Test
     fun imageSizingMaxWidthsAreTVAppropriate() {
-        assertEquals(480, ImageSizing.maxWidth(MediaCardPresentation.POSTER))
-        assertEquals(640, ImageSizing.maxWidth(MediaCardPresentation.LANDSCAPE))
-        assertEquals(420, ImageSizing.maxWidth(MediaCardPresentation.SQUARE))
+        assertEquals(240, ImageSizing.maxWidth(MediaCardPresentation.POSTER))
+        assertEquals(400, ImageSizing.maxWidth(MediaCardPresentation.LANDSCAPE))
+        assertEquals(240, ImageSizing.maxWidth(MediaCardPresentation.SQUARE))
     }
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TV_LARGE: very large logical canvases, not merely high raw pixel output. -->
+    <dimen name="tv_screen_margin_horizontal">64dp</dimen>
+    <dimen name="tv_header_logo_width">96dp</dimen>
+    <dimen name="tv_header_logo_height">40dp</dimen>
+    <dimen name="tv_nav_button_width">92dp</dimen>
+    <dimen name="tv_nav_button_height">38dp</dimen>
+    <dimen name="tv_poster_width">150dp</dimen>
+    <dimen name="tv_poster_height">225dp</dimen>
+    <dimen name="tv_landscape_width">280dp</dimen>
+    <dimen name="tv_landscape_height">158dp</dimen>
+    <dimen name="tv_square_width">172dp</dimen>
+    <dimen name="tv_square_height">172dp</dimen>
+    <dimen name="tv_hero_height">360dp</dimen>
+    <dimen name="tv_catalog_grid_height">560dp</dimen>
+</resources>

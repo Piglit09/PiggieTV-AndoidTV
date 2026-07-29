@@ -9,8 +9,9 @@ object PlaybackProgress {
 
 object ImageSizing {
     fun maxWidth(presentation: MediaCardPresentation): Int = when (presentation) {
-        MediaCardPresentation.POSTER -> 480
-        MediaCardPresentation.LANDSCAPE -> 640
-        MediaCardPresentation.SQUARE -> 420
+        // Sized for the 1920x1080 AFTKM app surface with modest decode headroom.
+        MediaCardPresentation.POSTER -> 240
+        MediaCardPresentation.LANDSCAPE -> 400
+        MediaCardPresentation.SQUARE -> 240
     }
 }

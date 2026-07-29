@@ -2,10 +2,26 @@
 <resources>
     <item name="card_image" type="id" />
     <item name="card_title" type="id" />
-    <item name="card_progress" type="id" />
     <item name="card_subtitle" type="id" />
+    <item name="card_progress" type="id" />
+    <item name="card_rating_star" type="id" />
+    <item name="card_rating_text" type="id" />
+    <item name="card_badge" type="id" />
+    <item name="media_card" type="id" />
+    <item name="card_artwork" type="id" />
+    <item name="focus_artwork_view" type="id" />
+    <item name="hero_row" type="id" />
+    <item name="discovery_shelf_id" type="id" />
 
     <item name="player_view" type="id" />
     <item name="player_title" type="id" />
     <item name="player_subtitle" type="id" />
+    <item name="up_next_play_now" type="id" />
+    <item name="up_next_cancel" type="id" />
+    <item name="up_next_close" type="id" />
+    <item name="player_audio_btn" type="id" />
+    <item name="player_subtitles_btn" type="id" />
+    <item name="player_connection_speed_btn" type="id" />
+
+    <item name="ptv_content_frame" type="id" />
 </resources>

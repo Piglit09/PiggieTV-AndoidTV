@@ -43,7 +43,7 @@ class ReadingMetadataTest {
     @Test
     fun testPageImageUrlConstruction() {
         val session = NativeSession("t", "s", "u", "n", "https://ptv.io")
-        val url = "https://ptv.io/Items/book123/Images/Page/5?api_key=t"
+        val url = "https://ptv.io/Items/book123/Images/Page/5"
         val api = com.piggie.tv.data.api.JellyfinNativeApi(RuntimeEnvironment.getApplication())
         assertEquals(url, api.getPageImageUrl(session, "book123", 5))
     }

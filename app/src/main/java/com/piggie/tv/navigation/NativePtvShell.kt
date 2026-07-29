@@ -12,15 +12,28 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import coil.dispose
 import coil.load
 import com.piggie.tv.R
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
+import com.piggie.tv.data.models.MediaItem
+import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.playback.MusicPlaybackManager
+import com.piggie.tv.data.playback.WaveProgressModel
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.diagnostics.PtvDiagnosticsManager
+import com.piggie.tv.diagnostics.PtvRedactor
 import com.piggie.tv.ui.player.NowPlayingActivity
+import com.piggie.tv.ui.layout.TvLayoutProfileResolver
+import com.piggie.tv.ui.rendering.TvRenderingRuntime
+import com.piggie.tv.ui.widgets.PtvWaveProgressView
+import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.util.dim
+import com.piggie.tv.util.PTVLog
 import com.piggie.tv.util.setTextSizeRes
 import kotlinx.coroutines.launch
 
@@ -35,40 +48,56 @@ object NativePtvShell {
         selected: NativeRoute,
         onRouteSelected: (NativeRoute) -> Unit
     ): NativePtvShellHost {
-        val root = LinearLayout(activity).apply {
+        val (profile, viewport) = TvLayoutProfileResolver.from(activity)
+        PTVLog.i("TV layout profile=$profile logical=${viewport.widthDp}x${viewport.heightDp}dp sw=${viewport.smallestWidthDp}dp")
+
+        val root = FrameLayout(activity).apply {
+            layoutParams = ViewGroup.LayoutParams(-1, -1)
+            if (TvRenderingRuntime.features().opaqueRoots) {
+                setBackgroundColor(PTVColors.background)
+            } else {
+                setBackgroundResource(R.drawable.tv_app_background)
+            }
+        }
+
+        if (TvRenderingRuntime.features().opaqueRoots) {
+            activity.window.setBackgroundDrawable(null)
+        }
+
+        val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(activity.dim(R.dimen.tv_screen_margin_horizontal), activity.dim(R.dimen.tv_screen_margin_vertical), activity.dim(R.dimen.tv_screen_margin_horizontal), activity.dim(R.dimen.tv_screen_margin_vertical))
-            setBackgroundResource(R.drawable.tv_app_background)
         }
+        root.addView(container, ViewGroup.LayoutParams(-1, -1))
+
         val header = LinearLayout(activity).apply {
-            gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(
+                activity.dim(R.dimen.tv_screen_margin_horizontal),
+                activity.dim(R.dimen.tv_screen_margin_vertical),
+                activity.dim(R.dimen.tv_screen_margin_horizontal),
+                activity.dim(R.dimen.tv_spacing_medium)
+            )
         }
+
+        // 1. Logo
         header.addView(ImageView(activity).apply {
             contentDescription = activity.getString(R.string.app_name)
             scaleType = ImageView.ScaleType.FIT_CENTER
             setImageResource(R.drawable.app_logo)
-        }, LinearLayout.LayoutParams(activity.dim(R.dimen.tv_header_logo_width), activity.dim(R.dimen.tv_header_logo_height)))
-        header.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
-        header.addView(Button(activity).apply {
-            text = "Profile"
-            setTextSizeRes(R.dimen.tv_nav_text_size)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            isAllCaps = false
-            setTextColor(activity.getColor(R.color.tv_text_primary))
-            setBackgroundResource(R.drawable.tv_button_secondary)
-            contentDescription = activity.getString(R.string.profile_button_description)
-            setOnClickListener { onRouteSelected(NativeRoute.PROFILE) }
-        }, LinearLayout.LayoutParams(activity.dim(R.dimen.tv_profile_button_width), activity.dim(R.dimen.tv_profile_button_height)))
-        root.addView(header)
+        }, LinearLayout.LayoutParams(
+            activity.dim(R.dimen.tv_header_logo_width),
+            activity.dim(R.dimen.tv_header_logo_height)
+        ))
 
+        // 2. Navigation Rail (In between Logo and Profile)
         val buttons = linkedMapOf<NativeRoute, Button>()
         val rail = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, activity.dim(R.dimen.tv_spacing_small), 0, activity.dim(R.dimen.tv_spacing_medium))
         }
-        NativeRoute.entries.filter { it != NativeRoute.PROFILE }.forEach { route ->
+        val primaryRoutes = NativeRoute.entries.filter { it != NativeRoute.PROFILE }
+        primaryRoutes.forEachIndexed { index, route ->
             val button = Button(activity).apply {
                 id = View.generateViewId()
                 text = route.label
@@ -82,26 +111,66 @@ object NativePtvShell {
                 setOnClickListener { onRouteSelected(route) }
             }
             buttons[route] = button
-            rail.addView(button, LinearLayout.LayoutParams(activity.dim(R.dimen.tv_nav_button_width), activity.dim(R.dimen.tv_nav_button_height)).apply { marginEnd = activity.dim(R.dimen.tv_nav_button_spacing) })
+            rail.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    activity.dim(R.dimen.tv_nav_button_width),
+                    activity.dim(R.dimen.tv_nav_button_height)
+                ).apply {
+                    if (index < primaryRoutes.lastIndex) {
+                        marginEnd = activity.dim(R.dimen.tv_nav_button_spacing)
+                    }
+                }
+            )
         }
-        root.addView(HorizontalScrollView(activity).apply {
+        
+        header.addView(HorizontalScrollView(activity).apply {
             isHorizontalScrollBarEnabled = false
+            isSmoothScrollingEnabled = false
+            isFocusable = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
+            setPadding(activity.dim(R.dimen.tv_spacing_large), 0, activity.dim(R.dimen.tv_spacing_large), 0)
             addView(rail)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        val content = FrameLayout(activity).apply {
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        // 3. Profile Button
+        val profileButton = Button(activity).apply {
             id = View.generateViewId()
+            text = "Profile"
+            setTextSizeRes(R.dimen.tv_nav_text_size)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            isAllCaps = false
+            setTextColor(activity.getColor(R.color.tv_text_primary))
+            setBackgroundResource(R.drawable.tv_nav_button)
+            contentDescription = activity.getString(R.string.profile_button_description)
+            isSelected = selected == NativeRoute.PROFILE
+            setOnClickListener { onRouteSelected(NativeRoute.PROFILE) }
         }
-        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        buttons[NativeRoute.PROFILE] = profileButton
+        header.addView(
+            profileButton,
+            LinearLayout.LayoutParams(
+                activity.dim(R.dimen.tv_profile_button_width),
+                activity.dim(R.dimen.tv_profile_button_height)
+            )
+        )
+        
+        container.addView(header)
+
+        val content = FrameLayout(activity).apply {
+            id = R.id.ptv_content_frame
+        }
+        container.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         
         val miniPlayer = createMiniPlayer(activity)
-        root.addView(miniPlayer)
+        container.addView(miniPlayer)
         
         activity.setContentView(root)
         return NativePtvShellHost(content, buttons)
     }
 
-    private fun createMiniPlayer(activity: android.app.Activity): View {
+    private fun createMiniPlayer(activity: Activity): View {
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -167,5 +236,13 @@ object NativePtvShell {
         }
 
         return container
+    }
+
+    private fun miniPlayerTime(activity: Activity) = TextView(activity).apply {
+        setTextColor(activity.getColor(R.color.tv_text_secondary))
+        setTextSizeRes(R.dimen.tv_text_size_metadata)
+        gravity = Gravity.CENTER
+        text = "0:00"
+        maxLines = 1
     }
 }

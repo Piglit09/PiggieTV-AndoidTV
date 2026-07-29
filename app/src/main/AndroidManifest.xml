@@ -9,13 +9,18 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
+        android:name=".PtvApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="PiggieTV"
         android:supportsRtl="true"
-        android:theme="@style/Theme.PiggieTV">
+        android:theme="@style/Theme.PiggieTV"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".auth.MainActivity"
@@ -61,7 +66,13 @@
             android:label="PiggieTV Now Playing" />
 
         <activity
-            android:name=".ui.player.ReaderActivity"
+            android:name=".ui.library.LibraryBrowserActivity"
+            android:exported="false"
+            android:label="PiggieTV Browser" />
+
+        <activity
+            android:name=".ui.reader.ReaderActivity"
+            android:enabled="false"
             android:exported="false"
             android:label="PiggieTV Reader" />
 

@@ -1,6 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -11,18 +20,45 @@ android {
         applicationId = "com.piggie.tv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 4
+        versionName = "0.8.6-beta.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("beta") {
+            storeFile = project.rootProject.file(localProperties.getProperty("PTV_KEYSTORE_PATH") ?: "keystore.jks")
+            storePassword = localProperties.getProperty("PTV_KEYSTORE_PASSWORD") ?: ""
+            keyAlias = localProperties.getProperty("PTV_KEY_ALIAS") ?: ""
+            keyPassword = localProperties.getProperty("PTV_KEY_PASSWORD") ?: ""
+        }
+    }
+
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
+            buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "true")
+        }
+        create("beta") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".beta"
+            versionNameSuffix = "-beta"
+            signingConfig = signingConfigs.getByName("beta")
+            buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
+            buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
+            isDebuggable = false
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("beta")
+            buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "false")
+            buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
         }
     }
 
@@ -37,6 +73,11 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -55,6 +96,8 @@ dependencies {
     // Lifecycle
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.activity:activity-ktx:1.9.3")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
 
     // Media3
     val media3Version = "1.5.1"

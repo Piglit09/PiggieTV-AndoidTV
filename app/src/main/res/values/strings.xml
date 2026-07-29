@@ -69,7 +69,7 @@
     <string name="search_action">Search</string>
     <string name="search_loading">Searching</string>
     <string name="search_results_prefix">Results for: </string>
-    <string name="settings_quality_auto">Playback quality: Auto</string>
+    <string name="settings_quality_auto">Connection Speed: Auto</string>
     <string name="settings_subtitles_auto">Subtitles: System default</string>
     <string name="settings_clear_image_cache">Clear image cache</string>
     <string name="settings_cache_cleared">Image cache cleared</string>
