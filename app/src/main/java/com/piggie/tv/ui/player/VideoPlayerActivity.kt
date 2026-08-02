@@ -55,6 +55,8 @@ import com.piggie.tv.data.playback.PlaybackTrackResolution
 import com.piggie.tv.data.playback.PlaybackTrackRouteResultPolicy
 import com.piggie.tv.data.playback.PlaybackTrackType
 import com.piggie.tv.data.playback.PlaybackSubtitleSidecarPolicy
+import com.piggie.tv.data.playback.SeasonPlaybackMode
+import com.piggie.tv.data.playback.SeasonPlaybackQueuePolicy
 import com.piggie.tv.data.playback.SubtitleSelectionMode
 import com.piggie.tv.data.playback.UP_NEXT_THRESHOLD_MS
 import com.piggie.tv.data.playback.UpNextOverlayAction
@@ -109,6 +111,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var playSessionId: String? = null
     private var currentItem: com.piggie.tv.data.models.MediaItem? = null
     private var nextEpisode: com.piggie.tv.data.models.MediaItem? = null
+    private var explicitEpisodeQueue: List<String> = emptyList()
     private var nextLookupInFlight = false
     private var nextLookupCompleted = false
     private var upNextOverlay: View? = null
@@ -215,6 +218,11 @@ class VideoPlayerActivity : AppCompatActivity() {
         MusicPlaybackManager.stop()
         session = store.read() ?: run { finish(); return }
         itemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: run { finish(); return }
+        explicitEpisodeQueue = intent.getStringArrayListExtra(EXTRA_EPISODE_QUEUE_IDS)
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+            ?.distinct()
+            .orEmpty()
         audioIndex = intent.getIntExtra(EXTRA_AUDIO_INDEX, -1).takeIf { it != -1 }
         subtitleIndex = intent.getIntExtra(EXTRA_SUBTITLE_INDEX, -1).takeIf { it != -1 }
         subtitleMode = intent.getStringExtra(EXTRA_SUBTITLE_MODE)
@@ -852,9 +860,21 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
         nextLookupInFlight = true
         val lookupForId = current.id
+        val explicitNextId = explicitEpisodeQueue
+            .takeIf { it.isNotEmpty() }
+            ?.let { SeasonPlaybackQueuePolicy.nextId(it, lookupForId) }
+        if (explicitEpisodeQueue.isNotEmpty() && explicitNextId == null) {
+            nextLookupInFlight = false
+            nextLookupCompleted = true
+            drainNextCallbacks(null)
+            return
+        }
         val generation = requestGeneration.get()
         launchApiWork(WORK_NEXT_LOOKUP, "ptv-next-episode") {
-            val next = runCatching { api.loadNextEpisode(session, current) }
+            val next = runCatching {
+                explicitNextId?.let { api.loadItem(session, it) }
+                    ?: api.loadNextEpisode(session, current)
+            }
                 .onFailure {
                     if (!Thread.currentThread().isInterrupted) {
                         PTVLog.e("Next episode lookup failed item=${PTVLog.mask(lookupForId)}", it)
@@ -870,6 +890,10 @@ class VideoPlayerActivity : AppCompatActivity() {
                 nextLookupInFlight = false
                 nextLookupCompleted = true
                 nextEpisode = next
+                if (explicitNextId != null && next != null) {
+                    // Reuse the fully hydrated queued item during transition instead of loading it twice.
+                    MediaDetailsSeedStore.put(next)
+                }
                 PTVLog.i("Next episode decision current=${PTVLog.mask(lookupForId)} next=${PTVLog.mask(next?.id)}")
                 PtvDiagnosticsManager.recordPlayback(
                     PtvPlaybackTrace(
@@ -931,7 +955,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun guardState(hasNext: Boolean) = AutoplayGuardState(
-        enabled = settings.autoplayNextEpisode,
+        enabled = explicitEpisodeQueue.isNotEmpty() || settings.autoplayNextEpisode,
         canceled = autoplayCanceled,
         hasNextItem = hasNext,
         appForeground = activityForeground,
@@ -1693,6 +1717,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val EXTRA_AUDIO_INDEX = "extra_audio_index"
         private const val EXTRA_SUBTITLE_INDEX = "extra_subtitle_index"
         private const val EXTRA_SUBTITLE_MODE = "extra_subtitle_mode"
+        private const val EXTRA_EPISODE_QUEUE_IDS = "extra_episode_queue_ids"
         private const val REPORTING_INTERVAL_MS = 15_000L
         private const val COUNTDOWN_TICK_MS = 500L
         private const val NEXT_LOOKUP_HEAD_START_MS = 5_000L
@@ -1739,6 +1764,26 @@ class VideoPlayerActivity : AppCompatActivity() {
                 if (subtitleIndex != null) putExtra(EXTRA_SUBTITLE_INDEX, subtitleIndex)
                 putExtra(EXTRA_SUBTITLE_MODE, subtitleMode.name)
             })
+        }
+
+        /** Starts a bounded season queue and prevents autoplay from spilling into another season. */
+        fun startSeason(
+            context: Context,
+            episodes: List<com.piggie.tv.data.models.MediaItem>,
+            shuffle: Boolean
+        ): Boolean {
+            val queue = SeasonPlaybackQueuePolicy.build(
+                episodes,
+                if (shuffle) SeasonPlaybackMode.SHUFFLE_ALL else SeasonPlaybackMode.PLAY_ALL
+            )
+            val firstItemId = queue.firstOrNull() ?: return false
+            context.startActivity(Intent(context, VideoPlayerActivity::class.java).apply {
+                putExtra(EXTRA_ITEM_ID, firstItemId)
+                putExtra(EXTRA_START_TICKS, 0L)
+                putExtra(EXTRA_SUBTITLE_MODE, SubtitleSelectionMode.DEFAULT.name)
+                putStringArrayListExtra(EXTRA_EPISODE_QUEUE_IDS, ArrayList(queue))
+            })
+            return true
         }
     }
 }

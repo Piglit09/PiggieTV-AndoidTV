@@ -1,8 +1,8 @@
 package com.piggie.tv.ui.player
 
 import android.graphics.Bitmap
+import android.graphics.Outline
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -14,6 +14,7 @@ import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -23,6 +24,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.DimenRes
+import androidx.appcompat.content.res.AppCompatResources
+import androidx.core.graphics.drawable.toDrawable
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
 import coil.dispose
@@ -66,6 +69,7 @@ import com.piggie.tv.util.setTextSizeRes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.lang.ref.WeakReference
 import kotlin.properties.ReadWriteProperty
 import kotlin.reflect.KProperty
 
@@ -78,6 +82,22 @@ private object PosterBackdropBlurTransformation : Transformation {
         // ImageView performs the final bilinear scale. Retaining a second full-size bitmap only
         // to display a deliberately blurred fallback wastes several megabytes on TV hardware.
         return Bitmap.createScaledBitmap(input, sampledWidth, sampledHeight, true)
+    }
+}
+
+private object DetailsPosterOutlineProvider : ViewOutlineProvider() {
+    override fun getOutline(view: View, outline: Outline) {
+        if (view.width <= 0 || view.height <= 0) {
+            outline.setEmpty()
+        } else {
+            outline.setRoundRect(
+                0,
+                0,
+                view.width,
+                view.height,
+                view.resources.getDimension(R.dimen.tv_media_artwork_corner_radius)
+            )
+        }
     }
 }
 
@@ -99,9 +119,10 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var scroll: ScrollView by viewReference()
     private var sideInfo: LinearLayout by viewReference()
     private var infoLeft: LinearLayout by viewReference()
-    private var brandingRight: FrameLayout by viewReference()
     private var logo: ImageView by viewReference()
+    private var poster: ImageView by viewReference()
     private var title: TextView by viewReference()
+    private var secondaryTitle: TextView by viewReference()
     private var metadataContainer: LinearLayout by viewReference()
     private var overview: TextView by viewReference()
     private var actionsRow: LinearLayout by viewReference()
@@ -116,11 +137,16 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var currentSeasonId: String? = null
     private var seasonList: RecyclerView? = null
     private var episodeList: RecyclerView? = null
+    private var episodePlayAllAction: View? = null
+    private var episodeShuffleAllAction: View? = null
     private var relatedList: RecyclerView? = null
     private var primaryAction: View? = null
     private var tracksReady = false
     private var destroyed = true
     private var requestGeneration = 0
+    private var episodeRequestGeneration = 0
+    private var titleLogoGeneration = 0
+    private var posterGeneration = 0
     private var interactiveReported = false
     private val traceCookie = TRACE_SEQUENCE.incrementAndGet()
     private var traceStarted = false
@@ -131,6 +157,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var relatedSettled = true
     private var pendingEpisodeFocusSeasonId: String? = null
     private var pendingActionSeasonFocus = false
+    private var focusBeforeExternalActivity: WeakReference<View>? = null
 
     private data class DetailsStackEntry(
         val itemId: String,
@@ -225,6 +252,26 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         return root
     }
 
+    override fun onPause() {
+        if (!destroyed && view != null && focusBeforeExternalActivity == null) {
+            activity?.currentFocus
+                ?.takeIf { focused -> isDescendant(root, focused) }
+                ?.let { focusBeforeExternalActivity = WeakReference(it) }
+        }
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val target = focusBeforeExternalActivity?.get() ?: return
+        focusBeforeExternalActivity = null
+        target.post {
+            if (!destroyed && target.isAttachedToWindow && target.isShown) {
+                target.requestFocus()
+            }
+        }
+    }
+
     override fun onDestroyView() {
         destroyed = true
         requestGeneration++
@@ -236,6 +283,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         root.removeAllViews()
         seasonList = null
         episodeList = null
+        episodePlayAllAction = null
+        episodeShuffleAllAction = null
         relatedList = null
         primaryAction = null
         currentItem = null
@@ -244,8 +293,18 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         pendingRestore = null
         pendingEpisodeFocusSeasonId = null
         pendingActionSeasonFocus = false
+        focusBeforeExternalActivity = null
         clearableViewReferences.forEach(ClearableViewReference<*>::clear)
         super.onDestroyView()
+    }
+
+    private fun isDescendant(parent: ViewGroup, child: View): Boolean {
+        var candidate: View? = child
+        while (candidate != null) {
+            if (candidate === parent) return true
+            candidate = candidate.parent as? View
+        }
+        return false
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -266,8 +325,23 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         cancelApiWork(WORK_EPISODES)
         backdrop.dispose()
         backdrop.setImageDrawable(null)
+        titleLogoGeneration++
         logo.dispose()
         logo.setImageDrawable(null)
+        logo.visibility = View.GONE
+        logo.contentDescription = null
+        title.text = currentItem?.title ?: "Loading details…"
+        title.visibility = View.VISIBLE
+        secondaryTitle.visibility = View.GONE
+        posterGeneration++
+        poster.dispose()
+        poster.setImageDrawable(null)
+        poster.visibility = View.GONE
+        sideInfo.visibility = if (sideInfo.children().any { it.visibility == View.VISIBLE }) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         seasonList?.recycledViewPool?.clear()
         episodeList?.recycledViewPool?.clear()
         relatedList?.recycledViewPool?.clear()
@@ -300,7 +374,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         root = FrameLayout(context).apply { setBackgroundColor(PTVColors.background) }
         backdrop = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setImageDrawable(ColorDrawable(PTVColors.background))
+            setImageDrawable(PTVColors.background.toDrawable())
         }
         root.addView(backdrop, ViewGroup.LayoutParams(-1, -1))
         root.addView(View(context).apply {
@@ -331,19 +405,61 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, context.dim(R.dimen.tv_spacing_large), 0)
         }
-        top.addView(sideInfo, LinearLayout.LayoutParams(context.dim(R.dimen.tv_hero_button_width) + 20, -2))
+        poster = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            outlineProvider = DetailsPosterOutlineProvider
+            clipToOutline = true
+            visibility = View.GONE
+        }
+        top.addView(
+            sideInfo,
+            LinearLayout.LayoutParams(
+                context.dim(R.dimen.tv_poster_width) + context.dim(R.dimen.tv_spacing_large),
+                -2
+            )
+        )
 
         infoLeft = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
-        title = textView("Loading details…", R.dimen.tv_text_size_hero_title, R.color.tv_text_primary, true)
+        val identity = FrameLayout(context).apply {
+            minimumHeight = context.dim(R.dimen.tv_details_logo_height)
+        }
+        title = textView("Loading details…", R.dimen.tv_text_size_hero_title, R.color.tv_text_primary, true).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        logo = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.FIT_START
+            visibility = View.GONE
+        }
+        identity.addView(title, FrameLayout.LayoutParams(-1, -2, Gravity.START or Gravity.CENTER_VERTICAL))
+        identity.addView(
+            logo,
+            FrameLayout.LayoutParams(
+                context.dim(R.dimen.tv_details_logo_width),
+                context.dim(R.dimen.tv_details_logo_height),
+                Gravity.START or Gravity.CENTER_VERTICAL
+            )
+        )
+        secondaryTitle = textView(
+            "",
+            R.dimen.tv_text_size_section_title,
+            R.color.tv_text_primary,
+            true
+        ).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            visibility = View.GONE
+        }
         metadataContainer = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         overview = textView("", R.dimen.tv_text_size_body, R.color.tv_text_secondary).apply {
             maxLines = 5
             setLineSpacing(0f, 1.2f)
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        infoLeft.addView(title)
+        infoLeft.addView(identity)
+        infoLeft.addView(secondaryTitle, topMargin(R.dimen.tv_spacing_small))
         infoLeft.addView(metadataContainer, topMargin(R.dimen.tv_spacing_small))
         infoLeft.addView(overview, topMargin(R.dimen.tv_spacing_medium))
 
@@ -351,22 +467,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        infoLeft.addView(actionsRow, topMargin(R.dimen.tv_spacing_large))
+        infoLeft.addView(actionsRow, topMargin(R.dimen.tv_spacing_medium))
         top.addView(infoLeft, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val brandingRightFrame = FrameLayout(context).apply {
-            setPadding(context.dim(R.dimen.tv_spacing_large), 0, 0, 0)
-        }
-        logo = ImageView(context).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
-        brandingRightFrame.addView(logo, FrameLayout.LayoutParams(
-            context.dim(R.dimen.tv_hero_logo_max_width_expanded),
-            context.dim(R.dimen.tv_hero_logo_max_height) + 120,
-            Gravity.CENTER
-        ))
-        brandingRight = brandingRightFrame
-        top.addView(brandingRightFrame, LinearLayout.LayoutParams(-2, -2))
         
         page.addView(top)
 
@@ -389,7 +491,12 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun renderLoadingIdentity() {
-        title.text = "Loading details…"
+        resetTitleArtwork("Loading details…")
+        poster.dispose()
+        poster.setImageDrawable(null)
+        poster.visibility = View.GONE
+        sideInfo.removeAllViews()
+        sideInfo.visibility = View.GONE
         metadataContainer.removeAllViews()
         overview.text = "Title and playback actions will appear as soon as the item is available."
         actionsRow.removeAllViews()
@@ -403,16 +510,18 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 .onSuccess { details ->
                     activity?.runOnUiThread {
                         if (!isCurrentRequest(generation, requestedItemId)) return@runOnUiThread
-                        currentItem = details
-                        tracksReady = !isVideoTrackItem(details)
+                        val resolvedDetails = DetailsNavigationMetadataPolicy.merge(currentItem, details)
+                        currentItem = resolvedDetails
+                        tracksReady = !isVideoTrackItem(resolvedDetails)
                         renderPrimary(
-                            details,
+                            resolvedDetails,
                             fullDetails = true,
                             preserveActionFocus = true
                         )
-                        renderSecondary(details, generation)
-                        if (isVideoTrackItem(details)) {
-                            loadPlaybackMetadata(details, generation)
+                        renderSecondary(resolvedDetails, generation)
+                        schedulePendingDetailsRestore()
+                        if (isVideoTrackItem(resolvedDetails)) {
+                            loadPlaybackMetadata(resolvedDetails, generation)
                         }
                         reportInteractive()
                     }
@@ -471,7 +580,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             schedulePendingActionSecondaryFocus()
             return
         }
-        title.text = "Details unavailable"
+        resetTitleArtwork("Details unavailable")
         overview.text = error.message ?: "The server did not return this item."
         actionsRow.removeAllViews()
         actionsRow.addView(actionButton("Retry", false, "Retry details") { loadDetails(itemId) })
@@ -485,29 +594,17 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         currentItem = item
         itemId = item.id
 
-        // 1. Side Info
-        sideInfo.removeAllViews()
-        if (item.director != null) {
-            sideInfo.addView(textView("DIRECTED BY", R.dimen.tv_text_size_metadata, R.color.tv_text_muted, true))
-            sideInfo.addView(textView(item.director, R.dimen.tv_text_size_metadata, R.color.tv_text_secondary), topMargin(R.dimen.tv_spacing_small))
-            sideInfo.addView(View(requireContext()), LinearLayout.LayoutParams(1, requireContext().dim(R.dimen.tv_spacing_medium)))
-        }
-        if (item.runtimeTicks > 0) {
-            sideInfo.addView(textView("RUNS", R.dimen.tv_text_size_metadata, R.color.tv_text_muted, true))
-            val mins = item.runtimeTicks / 10_000_000 / 60
-            sideInfo.addView(textView("$mins min", R.dimen.tv_text_size_metadata, R.color.tv_text_secondary), topMargin(R.dimen.tv_spacing_small))
-            sideInfo.addView(View(requireContext()), LinearLayout.LayoutParams(1, requireContext().dim(R.dimen.tv_spacing_medium)))
-
-            val endsAt = System.currentTimeMillis() + (item.runtimeTicks / 10_000)
-            val time = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(endsAt))
-            sideInfo.addView(textView("ENDS", R.dimen.tv_text_size_metadata, R.color.tv_text_muted, true))
-            sideInfo.addView(textView(time, R.dimen.tv_text_size_metadata, R.color.tv_text_secondary), topMargin(R.dimen.tv_spacing_small))
-        }
+        // 1. Side rail. Movies lead with their poster; timing reflects remaining playback.
+        renderSideInfo(item)
 
         // 2. Center Info
-        title.text = item.title
+        resetTitleArtwork(item.title)
         metadataContainer.removeAllViews()
-        
+
+        if (item.type.equals("Episode", ignoreCase = true) && DetailsArtworkPolicy.logoCandidates(item).isNotEmpty()) {
+            secondaryTitle.text = item.title
+        }
+
         if (item.communityRating != null && item.communityRating > 0) {
             metadataContainer.addView(ImageView(requireContext()).apply { setImageResource(R.drawable.ic_rating_star) }, LinearLayout.LayoutParams(requireContext().dim(R.dimen.tv_rating_icon_size), requireContext().dim(R.dimen.tv_rating_icon_size)))
             metadataContainer.addView(textView(String.format(Locale.getDefault(), " %.1f", item.communityRating), R.dimen.tv_text_size_metadata, R.color.tv_text_primary, true))
@@ -535,9 +632,184 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         if (fullDetails && item.type == "Series") loadNextUp(item, requestGeneration)
     }
 
+    private fun renderSideInfo(item: MediaItem) {
+        sideInfo.removeAllViews()
+        posterGeneration++
+        poster.dispose()
+        poster.setImageDrawable(null)
+        poster.visibility = View.GONE
+
+        if (item.type.equals("Movie", ignoreCase = true)) {
+            val posterCandidates = DetailsArtworkPolicy.posterCandidates(item)
+            if (posterCandidates.isNotEmpty()) {
+                poster.contentDescription = "${item.title} poster"
+                poster.visibility = View.VISIBLE
+                sideInfo.addView(
+                    poster,
+                    LinearLayout.LayoutParams(
+                        requireContext().dim(R.dimen.tv_poster_width),
+                        requireContext().dim(R.dimen.tv_poster_height)
+                    ).apply {
+                        bottomMargin = requireContext().dim(R.dimen.tv_spacing_medium)
+                    }
+                )
+                loadPosterArtwork(item, posterCandidates, generation = posterGeneration)
+            }
+        }
+
+        item.director?.takeIf(String::isNotBlank)?.let { director ->
+            addSideInfoValue("DIRECTED BY", director)
+        }
+        if (!item.type.equals("Series", ignoreCase = true)) {
+            DetailsTimePolicy.playTime(item.runtimeTicks)?.let { playTime ->
+                addSideInfoValue("PLAY TIME", playTime)
+                DetailsTimePolicy.endsAtMillis(
+                    nowMillis = System.currentTimeMillis(),
+                    runtimeTicks = item.runtimeTicks,
+                    playbackPositionTicks = item.playbackPositionTicks
+                )?.let { endsAt ->
+                    val time = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(endsAt))
+                    addSideInfoValue("ENDS", time, trailingSpace = false)
+                }
+            }
+        }
+        sideInfo.visibility = if (sideInfo.childCount == 0) View.GONE else View.VISIBLE
+    }
+
+    private fun addSideInfoValue(label: String, value: String, trailingSpace: Boolean = true) {
+        sideInfo.addView(textView(label, R.dimen.tv_text_size_metadata, R.color.tv_text_muted, true))
+        sideInfo.addView(
+            textView(value, R.dimen.tv_text_size_metadata, R.color.tv_text_secondary),
+            topMargin(R.dimen.tv_spacing_small)
+        )
+        if (trailingSpace) {
+            sideInfo.addView(
+                View(requireContext()),
+                LinearLayout.LayoutParams(1, requireContext().dim(R.dimen.tv_spacing_medium))
+            )
+        }
+    }
+
+    private fun resetTitleArtwork(fallbackTitle: String) {
+        titleLogoGeneration++
+        logo.dispose()
+        logo.setImageDrawable(null)
+        logo.visibility = View.GONE
+        logo.contentDescription = null
+        title.text = fallbackTitle
+        title.visibility = View.VISIBLE
+        secondaryTitle.text = ""
+        secondaryTitle.visibility = View.GONE
+    }
+
+    private fun loadTitleLogo(
+        item: MediaItem,
+        candidates: List<DetailsArtworkRef>,
+        generation: Int,
+        index: Int = 0
+    ) {
+        if (index >= candidates.size) {
+            if (currentItem?.id == item.id && titleLogoGeneration == generation) {
+                logo.setImageDrawable(null)
+                logo.visibility = View.GONE
+                title.visibility = View.VISIBLE
+                secondaryTitle.visibility = View.GONE
+            }
+            return
+        }
+        val candidate = candidates[index]
+        logo.load(artworkUrl(candidate)) {
+            crossfade(features.transitions)
+            placeholder(android.graphics.Color.TRANSPARENT.toDrawable())
+            size(DETAILS_LOGO_WIDTH, DETAILS_LOGO_HEIGHT)
+            setParameter(
+                PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                PtvCoilEventListenerFactory.CATEGORY_DETAILS_LOGO,
+                null
+            )
+            listener(
+                onSuccess = { _, _ ->
+                    logo.post {
+                        if (
+                            isAdded && !destroyed && currentItem?.id == item.id &&
+                            titleLogoGeneration == generation
+                        ) {
+                            logo.contentDescription = item.title
+                            logo.visibility = View.VISIBLE
+                            title.visibility = View.GONE
+                            secondaryTitle.visibility = if (
+                                item.type.equals("Episode", ignoreCase = true)
+                            ) View.VISIBLE else View.GONE
+                        }
+                    }
+                },
+                onError = { _, _ ->
+                    logo.post {
+                        if (
+                            isAdded && !destroyed && currentItem?.id == item.id &&
+                            titleLogoGeneration == generation
+                        ) {
+                            loadTitleLogo(item, candidates, generation, index + 1)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun loadPosterArtwork(
+        item: MediaItem,
+        candidates: List<DetailsArtworkRef>,
+        index: Int = 0,
+        generation: Int
+    ) {
+        if (index >= candidates.size) {
+            if (currentItem?.id == item.id && posterGeneration == generation) {
+                poster.setImageDrawable(null)
+                poster.visibility = View.GONE
+                sideInfo.visibility = if (sideInfo.children().any { it.visibility == View.VISIBLE }) {
+                    View.VISIBLE
+                } else {
+                    View.GONE
+                }
+            }
+            return
+        }
+        val candidate = candidates[index]
+        poster.load(artworkUrl(candidate)) {
+            crossfade(features.transitions)
+            placeholder(android.graphics.Color.TRANSPARENT.toDrawable())
+            size(
+                requireContext().dim(R.dimen.tv_poster_width),
+                requireContext().dim(R.dimen.tv_poster_height)
+            )
+            setParameter(
+                PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                PtvCoilEventListenerFactory.CATEGORY_DETAILS_POSTER,
+                null
+            )
+            allowRgb565(features.rgb565Posters)
+            listener(
+                onError = { _, _ ->
+                    poster.post {
+                        if (
+                            isAdded && !destroyed && currentItem?.id == item.id &&
+                            posterGeneration == generation
+                        ) {
+                            loadPosterArtwork(item, candidates, index + 1, generation)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
     private fun renderArtwork(item: MediaItem, fullDetails: Boolean) {
         val logos = DetailsArtworkPolicy.logoCandidates(item)
-        if (logos.isNotEmpty()) loadArtwork(logo, logos, item.id)
+        if (logos.isNotEmpty()) {
+            val generation = titleLogoGeneration
+            loadTitleLogo(item, logos, generation)
+        }
 
         if (!fullDetails || features.detailsBackdrop == DetailsBackdropMode.NONE) return
         handler.removeCallbacksAndMessages(BACKDROP_HANDLER_TOKEN)
@@ -561,28 +833,20 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     ) {
         target.dispose()
         if (index >= candidates.size) {
-            target.setImageDrawable(ColorDrawable(if (target === backdrop) PTVColors.background else PTVColors.cardBackground))
+            target.setImageDrawable(PTVColors.background.toDrawable())
             return
         }
         val candidate = candidates[index]
         target.load(artworkUrl(candidate)) {
             crossfade(features.transitions)
-            placeholder(ColorDrawable(if (target === backdrop) PTVColors.background else PTVColors.cardBackground))
-            if (target === backdrop) {
-                size(DETAILS_BACKDROP_WIDTH, DETAILS_BACKDROP_HEIGHT)
-            } else {
-                size(DETAILS_LOGO_WIDTH, DETAILS_LOGO_HEIGHT)
-            }
+            placeholder(PTVColors.background.toDrawable())
+            size(DETAILS_BACKDROP_WIDTH, DETAILS_BACKDROP_HEIGHT)
             setParameter(
                 PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
-                if (target === backdrop) {
-                    PtvCoilEventListenerFactory.CATEGORY_DETAILS_BACKDROP
-                } else {
-                    PtvCoilEventListenerFactory.CATEGORY_DETAILS_LOGO
-                },
+                PtvCoilEventListenerFactory.CATEGORY_DETAILS_BACKDROP,
                 null
             )
-            allowRgb565(features.rgb565Posters && target !== backdrop)
+            allowRgb565(false)
             if (target === backdrop && candidate.blurred) {
                 transformations(PosterBackdropBlurTransformation)
             }
@@ -633,12 +897,28 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         primaryAction = play
         addAction(play)
 
+        EpisodeSeriesNavigationPolicy.seriesId(item)?.let { seriesId ->
+            addAction(
+                actionButton("View Series", true, SERIES_DESCRIPTION) {
+                    openNestedDetails(seriesId)
+                }.apply { tag = VIEW_SERIES_FOCUS_TAG }
+            )
+        }
+
         addAction(
-            iconActionButton(R.drawable.ic_action_favorite, item.isFavorite) { updateFavorite(item) },
+            iconActionButton(
+                R.drawable.ic_action_favorite,
+                item.isFavorite,
+                if (item.isFavorite) "Remove from favorites" else "Add to favorites"
+            ) { updateFavorite(item) },
             square = true
         )
         addAction(
-            iconActionButton(R.drawable.ic_action_watched, item.isPlayed) { updatePlayed(item) },
+            iconActionButton(
+                R.drawable.ic_action_watched,
+                item.isPlayed,
+                if (item.isPlayed) "Mark unplayed" else "Mark played"
+            ) { updatePlayed(item) },
             square = true
         )
 
@@ -688,8 +968,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         actionsRow.addView(
             view,
             LinearLayout.LayoutParams(
-                if (square) context.dim(R.dimen.tv_hero_button_height) else -2,
-                context.dim(R.dimen.tv_hero_button_height)
+                if (square) context.dim(R.dimen.tv_details_action_height) else -2,
+                context.dim(R.dimen.tv_details_action_height)
             ).apply {
                 if (actionsRow.childCount > 1) marginStart = context.dim(R.dimen.tv_spacing_small)
             }
@@ -705,10 +985,17 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         text = label
         contentDescription = description
         isAllCaps = false
-        setTextSizeRes(R.dimen.tv_nav_text_size)
+        includeFontPadding = false
+        gravity = Gravity.CENTER
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = 0
+        minimumHeight = 0
+        setTextSizeRes(R.dimen.tv_details_action_text_size)
         setTextColor(requireContext().getColor(R.color.tv_text_primary))
         setBackgroundResource(if (secondary) R.drawable.tv_button_secondary else R.drawable.tv_button_primary)
-        setPadding(requireContext().dim(R.dimen.tv_spacing_medium), 0, requireContext().dim(R.dimen.tv_spacing_medium), 0)
+        val horizontalPadding = requireContext().dim(R.dimen.tv_details_action_padding_horizontal)
+        setPadding(horizontalPadding, 0, horizontalPadding, 0)
         setOnClickListener { action(this) }
         setOnFocusChangeListener { v, f -> PTVShapes.applyFocusEffect(v, f) }
     }
@@ -717,23 +1004,39 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         Button(requireContext()).apply {
             text = label
             isAllCaps = false
-            setCompoundDrawablesWithIntrinsicBounds(iconRes, 0, 0, 0)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            val icon = AppCompatResources.getDrawable(requireContext(), iconRes)?.mutate()?.apply {
+                val iconSize = requireContext().dim(R.dimen.tv_details_action_icon_size)
+                setBounds(0, 0, iconSize, iconSize)
+            }
+            setCompoundDrawables(icon, null, null, null)
             compoundDrawablePadding = requireContext().dim(R.dimen.tv_spacing_small)
-            setTextSizeRes(R.dimen.tv_nav_text_size)
+            setTextSizeRes(R.dimen.tv_details_action_text_size)
             setTextColor(requireContext().getColor(R.color.tv_text_primary))
             setBackgroundResource(R.drawable.tv_button_primary)
-            setPadding(requireContext().dim(R.dimen.tv_spacing_large), 0, requireContext().dim(R.dimen.tv_spacing_large), 0)
+            val horizontalPadding = requireContext().dim(R.dimen.tv_details_action_padding_horizontal)
+            setPadding(horizontalPadding, 0, horizontalPadding, 0)
             setOnClickListener { action() }
             setOnFocusChangeListener { v, f -> PTVShapes.applyFocusEffect(v, f) }
         }
 
-    private fun iconActionButton(iconRes: Int, active: Boolean, action: () -> Unit): Button =
-        Button(requireContext()).apply {
-            setCompoundDrawablesWithIntrinsicBounds(iconRes, 0, 0, 0)
-            setBackgroundResource(if (active) R.drawable.tv_button_primary else R.drawable.tv_button_secondary)
-            setOnClickListener { action() }
-            setOnFocusChangeListener { v, f -> PTVShapes.applyFocusEffect(v, f) }
-        }
+    private fun iconActionButton(
+        iconRes: Int,
+        active: Boolean,
+        description: String,
+        action: () -> Unit
+    ): PtvStatusIconButton = PtvStatusIconButton(
+        requireContext(),
+        iconRes,
+        description,
+        active,
+        action
+    )
 
     private fun showAudioSelection(item: MediaItem, opener: View) {
         val options = listOf("Default / Auto") + item.audioTracks.map(::audioTrackLabel)
@@ -806,8 +1109,15 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private fun startPlayback(item: MediaItem) {
         // Reuse the fully loaded Details item in the player. Besides avoiding a redundant request,
         // this preserves the exact MediaSourceId that owns the displayed stream indices.
+        rememberExternalFocus(activity?.currentFocus)
         MediaDetailsSeedStore.put(item)
         VideoPlayerActivity.start(requireContext(), item.id, item.playbackPositionTicks, PendingPlaybackPreferences.get(item.id))
+    }
+
+    private fun rememberExternalFocus(target: View?) {
+        target
+            ?.takeIf { focused -> isDescendant(root, focused) }
+            ?.let { focusBeforeExternalActivity = WeakReference(it) }
     }
 
     private fun playSeries(series: MediaItem) {
@@ -911,11 +1221,29 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                         seasonsSettled = true
                         if (seasons.isEmpty()) {
                             episodesSettled = true
+                            clearSeasonShelf()
+                            clearEpisodeShelf()
                             seasonsContainer.visibility = View.GONE
+                            episodesContainer.visibility = View.GONE
                         } else {
                             showSeasons(series, seasons, generation)
                         }
                         schedulePendingActionSecondaryFocus()
+                        schedulePendingDetailsRestore()
+                    }
+                }
+                .onFailure {
+                    activity?.runOnUiThread {
+                        if (!isCurrentRequest(generation, series.id)) return@runOnUiThread
+                        seasonsSettled = true
+                        episodesSettled = true
+                        clearSeasonShelf()
+                        seasonsContainer.visibility = View.GONE
+                        clearEpisodeShelf()
+                        episodesContainer.visibility = View.GONE
+                        pendingEpisodeFocusSeasonId = null
+                        schedulePendingActionSecondaryFocus()
+                        schedulePendingDetailsRestore()
                     }
                 }
         }
@@ -933,29 +1261,130 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
         seasonList = list
         seasonsContainer.addView(list, LinearLayout.LayoutParams(-1, requireContext().dim(R.dimen.tv_poster_height) + requireContext().dim(R.dimen.tv_shelf_extra_height)))
-        selectSeason(series, seasons.first(), generation, false)
+        val seasonToRestore = pendingRestore
+            ?.takeIf { it.itemId == series.id }
+            ?.seasonId
+            ?.let { savedSeasonId -> seasons.firstOrNull { it.id == savedSeasonId } }
+            ?: seasons.first()
+        selectSeason(series, seasonToRestore, generation, false)
+        list.post {
+            schedulePendingActionSecondaryFocus()
+            schedulePendingDetailsRestore()
+        }
     }
 
     private fun selectSeason(series: MediaItem, season: MediaItem, generation: Int, userInitiated: Boolean) {
+        val firstEpisode = firstFocusableChild(episodeList)
+        val hasLoadedEpisode = firstEpisode != null || (episodeList?.adapter?.itemCount ?: 0) > 0
+        val decision = SeasonSelectionPolicy.decide(
+            userInitiated = userInitiated,
+            isCurrentSeason = currentSeasonId == season.id,
+            hasFocusableEpisode = hasLoadedEpisode
+        )
+        if (decision == SeasonSelectionDecision.FOCUS_LOADED_EPISODES) {
+            pendingEpisodeFocusSeasonId = season.id
+            if (firstEpisode?.requestFocus() == true) {
+                pendingEpisodeFocusSeasonId = null
+                scrollEpisodesIntoView()
+            } else {
+                episodeList?.post { schedulePendingEpisodeFocus(season.id) }
+            }
+            return
+        }
+
         currentSeasonId = season.id
         episodesSettled = false
+        pendingEpisodeFocusSeasonId = if (
+            decision == SeasonSelectionDecision.LOAD_AND_FOCUS_EPISODES
+        ) season.id else null
+        val episodeRequest = ++episodeRequestGeneration
+        showEpisodesLoading(season)
         launchApiWork(WORK_EPISODES, "ptv-episodes-${season.id}") {
             runCatching { api.loadEpisodes(session, series.id, season.id) }
                 .onSuccess { episodes ->
                     activity?.runOnUiThread {
-                        if (!isCurrentRequest(generation, series.id) || currentSeasonId != season.id) return@runOnUiThread
-                        showEpisodes(episodes)
+                        if (!isCurrentEpisodeRequest(generation, series.id, season.id, episodeRequest)) {
+                            return@runOnUiThread
+                        }
                         episodesSettled = true
+                        showEpisodes(episodes, season.id)
+                    }
+                }
+                .onFailure {
+                    activity?.runOnUiThread {
+                        if (!isCurrentEpisodeRequest(generation, series.id, season.id, episodeRequest)) {
+                            return@runOnUiThread
+                        }
+                        episodesSettled = true
+                        pendingEpisodeFocusSeasonId = null
+                        showEpisodesFailure(series, season, generation)
                     }
                 }
         }
     }
 
-    private fun showEpisodes(episodes: List<MediaItem>) {
-        episodesContainer.removeAllViews()
-        if (episodes.isEmpty()) { episodesContainer.visibility = View.GONE; return }
+    private fun isCurrentEpisodeRequest(
+        generation: Int,
+        seriesId: String,
+        seasonId: String,
+        episodeRequest: Int
+    ): Boolean = isCurrentRequest(generation, seriesId) &&
+        currentSeasonId == seasonId &&
+        episodeRequestGeneration == episodeRequest
+
+    private fun showEpisodesLoading(season: MediaItem) {
+        clearEpisodeShelf()
         episodesContainer.visibility = View.VISIBLE
         episodesContainer.addView(sectionLabel("Episodes"))
+        episodesContainer.addView(
+            textView(
+                "Loading ${SeasonCardPolicy.label(season)} episodes\u2026",
+                R.dimen.tv_text_size_body,
+                R.color.tv_text_secondary
+            ),
+            topMargin(R.dimen.tv_spacing_small)
+        )
+    }
+
+    private fun showEpisodesFailure(series: MediaItem, season: MediaItem, generation: Int) {
+        clearEpisodeShelf()
+        episodesContainer.visibility = View.VISIBLE
+        episodesContainer.addView(sectionLabel("Episodes"))
+        episodesContainer.addView(
+            textView(
+                "Episodes could not be loaded.",
+                R.dimen.tv_text_size_body,
+                R.color.tv_text_secondary
+            ),
+            topMargin(R.dimen.tv_spacing_small)
+        )
+        episodesContainer.addView(
+            actionButton("Retry", true, "Retry episodes") {
+                selectSeason(series, season, generation, true)
+            },
+            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height)).apply {
+                topMargin = requireContext().dim(R.dimen.tv_spacing_small)
+            }
+        )
+    }
+
+    private fun showEpisodes(episodes: List<MediaItem>, seasonId: String) {
+        clearEpisodeShelf()
+        episodesContainer.visibility = View.VISIBLE
+        if (episodes.isEmpty()) {
+            episodesContainer.addView(sectionLabel("Episodes"))
+            episodesContainer.addView(
+                textView(
+                    "No episodes are available for this season.",
+                    R.dimen.tv_text_size_body,
+                    R.color.tv_text_secondary
+                ),
+                topMargin(R.dimen.tv_spacing_small)
+            )
+            pendingEpisodeFocusSeasonId = null
+            return
+        }
+        episodesContainer.addView(episodeHeader(episodes))
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.HORIZONTAL, false)
         val list = RecyclerView(requireContext()).apply {
             layoutManager = manager
@@ -964,6 +1393,101 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
         episodeList = list
         episodesContainer.addView(list, LinearLayout.LayoutParams(-1, requireContext().dim(R.dimen.tv_landscape_height) + requireContext().dim(R.dimen.tv_shelf_extra_height)))
+        list.post {
+            schedulePendingEpisodeFocus(seasonId)
+            schedulePendingDetailsRestore()
+        }
+    }
+
+    private fun episodeHeader(episodes: List<MediaItem>): View = LinearLayout(requireContext()).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(sectionLabel("Episodes"), LinearLayout.LayoutParams(0, -2, 1f))
+
+        fun bulkAction(label: String, description: String, shuffle: Boolean): View =
+            actionButton(label, true, description) { opener ->
+                rememberExternalFocus(opener)
+                if (!VideoPlayerActivity.startSeason(requireContext(), episodes, shuffle)) {
+                    Toast.makeText(requireContext(), "No episodes are available to play.", Toast.LENGTH_SHORT).show()
+                }
+            }.apply {
+                setOnKeyListener { _, keyCode, event ->
+                    if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                    when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            val target = firstFocusableChild(episodeList)
+                            val moved = target?.requestFocus() == true
+                            if (moved) scrollEpisodesIntoView()
+                            moved
+                        }
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            val target = currentSeasonId?.let { selectedSeasonId ->
+                                seasonList?.let { findFocusableViewWithTag(it, selectedSeasonId) }
+                            }
+                            target?.requestFocus() == true
+                        }
+                        else -> false
+                    }
+                }
+            }
+
+        val playAll = bulkAction("Play All", "Play all episodes in this season", false)
+        val shuffleAll = bulkAction("Shuffle All", "Shuffle all episodes in this season", true)
+        playAll.id = View.generateViewId()
+        shuffleAll.id = View.generateViewId()
+        playAll.nextFocusRightId = shuffleAll.id
+        shuffleAll.nextFocusLeftId = playAll.id
+        episodePlayAllAction = playAll
+        episodeShuffleAllAction = shuffleAll
+        addView(
+            playAll,
+            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height))
+        )
+        addView(
+            shuffleAll,
+            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height)).apply {
+                marginStart = requireContext().dim(R.dimen.tv_spacing_small)
+            }
+        )
+    }
+
+    private fun clearEpisodeShelf() {
+        releaseShelf(episodeList)
+        episodeList = null
+        episodePlayAllAction = null
+        episodeShuffleAllAction = null
+        episodesContainer.removeAllViews()
+    }
+
+    private fun clearSeasonShelf() {
+        releaseShelf(seasonList)
+        seasonList = null
+        seasonsContainer.removeAllViews()
+        currentSeasonId = null
+    }
+
+    private fun clearRelatedShelf() {
+        releaseShelf(relatedList)
+        relatedList = null
+        relatedContainer.removeAllViews()
+    }
+
+    private fun releaseShelf(list: RecyclerView?) {
+        list ?: return
+        list.adapter = null
+        list.layoutManager = null
+        list.recycledViewPool.clear()
+    }
+
+    private fun clearSecondaryShelves() {
+        clearSeasonShelf()
+        clearEpisodeShelf()
+        clearRelatedShelf()
+        seasonsContainer.visibility = View.GONE
+        episodesContainer.visibility = View.GONE
+        relatedContainer.visibility = View.GONE
+        pendingEpisodeFocusSeasonId = null
+        pendingActionSeasonFocus = false
     }
 
     private fun loadRelated(item: MediaItem, generation: Int) {
@@ -974,15 +1498,31 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                     activity?.runOnUiThread {
                         if (!isCurrentRequest(generation, item.id)) return@runOnUiThread
                         relatedSettled = true
-                        if (related.isEmpty()) relatedContainer.visibility = View.GONE else showRelated(related)
+                        if (related.isEmpty()) {
+                            clearRelatedShelf()
+                            relatedContainer.visibility = View.GONE
+                        } else {
+                            showRelated(related)
+                        }
                         schedulePendingActionSecondaryFocus()
+                        schedulePendingDetailsRestore()
+                    }
+                }
+                .onFailure {
+                    activity?.runOnUiThread {
+                        if (!isCurrentRequest(generation, item.id)) return@runOnUiThread
+                        relatedSettled = true
+                        clearRelatedShelf()
+                        relatedContainer.visibility = View.GONE
+                        schedulePendingActionSecondaryFocus()
+                        schedulePendingDetailsRestore()
                     }
                 }
         }
     }
 
     private fun showRelated(items: List<MediaItem>) {
-        relatedContainer.removeAllViews()
+        clearRelatedShelf()
         relatedContainer.visibility = View.VISIBLE
         relatedContainer.addView(sectionLabel("More Like This"))
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.HORIZONTAL, false)
@@ -993,11 +1533,31 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
         relatedList = list
         relatedContainer.addView(list, LinearLayout.LayoutParams(-1, requireContext().dim(R.dimen.tv_poster_height) + requireContext().dim(R.dimen.tv_shelf_extra_height)))
+        list.post {
+            schedulePendingActionSecondaryFocus()
+            schedulePendingDetailsRestore()
+        }
     }
 
     private fun requestFirstSeasonOrSecondary(previous: View): Boolean {
-        val target = firstFocusableChild(seasonList) ?: firstFocusableChild(relatedList)
-        return target?.requestFocus() ?: false
+        val seasonTarget = firstFocusableChild(seasonList)
+        val relatedTarget = firstFocusableChild(relatedList)
+        val decision = ActionSecondaryFocusPolicy.decide(
+            hasFocusableSeason = seasonTarget != null,
+            seasonState = shelfState(seasonList, seasonsSettled),
+            hasFocusableRelated = relatedTarget != null,
+            relatedState = shelfState(relatedList, relatedSettled)
+        )
+        return when (decision) {
+            ActionSecondaryFocusDecision.MOVE_TO_SEASONS -> seasonTarget?.requestFocus() == true
+            ActionSecondaryFocusDecision.MOVE_TO_RELATED -> relatedTarget?.requestFocus() == true
+            ActionSecondaryFocusDecision.WAIT -> {
+                pendingActionSeasonFocus = true
+                (seasonList ?: relatedList)?.post { schedulePendingActionSecondaryFocus() }
+                true
+            }
+            ActionSecondaryFocusDecision.PASS_THROUGH -> false
+        }
     }
 
     private fun firstFocusableChild(list: RecyclerView?): View? {
@@ -1005,12 +1565,91 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         return recycler.layoutManager?.getChildAt(0)
     }
 
+    private fun shelfState(list: RecyclerView?, settled: Boolean): AsyncShelfState = when {
+        !settled -> AsyncShelfState.LOADING
+        (list?.adapter?.itemCount ?: 0) > 0 -> AsyncShelfState.NON_EMPTY
+        else -> AsyncShelfState.EMPTY_OR_ERROR
+    }
+
     private fun schedulePendingActionSecondaryFocus() {
-        if (pendingActionSeasonFocus) {
-             val target = firstFocusableChild(seasonList) ?: firstFocusableChild(relatedList)
-             target?.requestFocus()
-             pendingActionSeasonFocus = false
+        if (!pendingActionSeasonFocus) return
+        val target = firstFocusableChild(seasonList) ?: firstFocusableChild(relatedList)
+        if (target?.requestFocus() == true) {
+            pendingActionSeasonFocus = false
+        } else if (seasonsSettled && relatedSettled) {
+            pendingActionSeasonFocus = false
         }
+    }
+
+    private fun requestEpisodesForSeason(
+        series: MediaItem,
+        season: MediaItem,
+        generation: Int
+    ): Boolean {
+        if (currentSeasonId != season.id) {
+            selectSeason(series, season, generation, true)
+            return true
+        }
+        episodePlayAllAction?.takeIf { it.isShown && it.isFocusable }?.let { playAll ->
+            if (playAll.requestFocus()) {
+                scrollEpisodesIntoView()
+                return true
+            }
+        }
+        val target = firstFocusableChild(episodeList)
+        return when (
+            SeasonEpisodeEntryPolicy.decide(
+                hasFocusableEpisode = target != null,
+                episodesLoading = !episodesSettled
+            )
+        ) {
+            SeasonEpisodeEntryDecision.MOVE_TO_EPISODES -> {
+                val moved = target?.requestFocus() == true
+                if (moved) scrollEpisodesIntoView()
+                moved
+            }
+            SeasonEpisodeEntryDecision.WAIT_FOR_EPISODES -> {
+                pendingEpisodeFocusSeasonId = season.id
+                true
+            }
+            SeasonEpisodeEntryDecision.PASS_THROUGH -> false
+        }
+    }
+
+    private fun schedulePendingEpisodeFocus(seasonId: String) {
+        if (pendingEpisodeFocusSeasonId != seasonId || currentSeasonId != seasonId) return
+        val target = firstFocusableChild(episodeList) ?: return
+        if (target.requestFocus()) {
+            pendingEpisodeFocusSeasonId = null
+            scrollEpisodesIntoView()
+        }
+    }
+
+    private fun scrollEpisodesIntoView() {
+        scroll.smoothScrollTo(0, episodesContainer.top)
+    }
+
+    private fun schedulePendingDetailsRestore() {
+        val restore = pendingRestore?.takeIf { it.itemId == itemId } ?: return
+        root.post {
+            if (destroyed || pendingRestore !== restore || itemId != restore.itemId) return@post
+            val target = restore.focusedItemId?.let { findFocusableViewWithTag(root, it) }
+            if (restore.focusedItemId != null && target == null) return@post
+            val focused = target?.requestFocus() ?: primaryAction?.requestFocus() ?: false
+            if (focused) {
+                scroll.scrollTo(0, restore.scrollY)
+                pendingRestore = null
+            }
+        }
+    }
+
+    private fun findFocusableViewWithTag(view: View, itemTag: String): View? {
+        if (view.tag == itemTag && view.isFocusable && view.isShown) return view
+        if (view !is ViewGroup) return null
+        for (index in 0 until view.childCount) {
+            findFocusableViewWithTag(view.getChildAt(index), itemTag)?.let { return it }
+        }
+        return null
     }
 
     private inner class SeasonAdapter(
@@ -1025,11 +1664,17 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             val season = seasons[position]
             MediaCardFactory.bindView(holder, season, MediaCardPresentation.POSTER, session, api)
             holder.itemView.setOnClickListener { selectSeason(series, season, generation, true) }
+            holder.itemView.setOnKeyListener { _, keyCode, event ->
+                event.action == KeyEvent.ACTION_DOWN &&
+                    keyCode == KeyEvent.KEYCODE_DPAD_DOWN &&
+                    requestEpisodesForSeason(series, season, generation)
+            }
         }
 
         override fun onViewRecycled(holder: MediaCardHolder) {
             MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
+            holder.itemView.setOnKeyListener(null)
             super.onViewRecycled(holder)
         }
     }
@@ -1042,11 +1687,20 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             val ep = episodes[position]
             MediaCardFactory.bindView(holder, ep, MediaCardPresentation.LANDSCAPE, session, api)
             holder.itemView.setOnClickListener { openNestedDetails(ep) }
+            holder.itemView.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN || keyCode != KeyEvent.KEYCODE_DPAD_UP) {
+                    false
+                } else {
+                    val target = if (position == 0) episodePlayAllAction else episodeShuffleAllAction
+                    target?.requestFocus() == true
+                }
+            }
         }
 
         override fun onViewRecycled(holder: MediaCardHolder) {
             MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
+            holder.itemView.setOnKeyListener(null)
             super.onViewRecycled(holder)
         }
     }
@@ -1089,7 +1743,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             holder.name.text = p.name
             holder.role.text = p.role ?: p.type
             holder.avatar.load("${session.serverUrl}/Items/${p.id}/Images/Primary?maxWidth=200") {
-                placeholder(ColorDrawable(PTVColors.cardBackground))
+                placeholder(PTVColors.cardBackground.toDrawable())
                 transformations(coil.transform.CircleCropTransformation())
                 val avatarSize = requireContext().dim(R.dimen.tv_avatar_size)
                 size(avatarSize, avatarSize)
@@ -1104,6 +1758,19 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun openNestedDetails(item: MediaItem) {
+        pendingRestore = null
+        pushCurrentDetails()
+        MediaDetailsSeedStore.put(item)
+        switchItem(item, false)
+    }
+
+    private fun openNestedDetails(nestedItemId: String) {
+        pendingRestore = null
+        pushCurrentDetails()
+        switchItem(nestedItemId)
+    }
+
+    private fun pushCurrentDetails() {
         currentItem?.let {
             MediaDetailsSeedStore.put(it)
             detailsStack.addLast(
@@ -1116,20 +1783,18 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 )
             )
         }
-        MediaDetailsSeedStore.put(item)
-        switchItem(item, false)
     }
 
     /** Called by the host before it removes the details surface. */
     fun handleBackWithinDetails(): Boolean {
         val previous = detailsStack.pollLast() ?: return false
+        pendingRestore = previous
         val seed = MediaDetailsSeedStore.getItem(previous.itemId)
         if (seed != null) {
             switchItem(seed, true)
         } else {
             switchItem(previous.itemId)
         }
-        scroll.post { scroll.scrollTo(0, previous.scrollY) }
         return true
     }
 
@@ -1140,6 +1805,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         requireArguments().putString(ARG_ITEM_ID, restoredItemId)
         currentItem = null
         nextUpItem = null
+        clearSecondaryShelves()
         renderLoadingIdentity()
         scroll.scrollTo(0, 0)
         loadDetails(restoredItemId)
@@ -1152,8 +1818,10 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         requireArguments().putString(ARG_ITEM_ID, item.id)
         currentItem = item
         nextUpItem = null
+        clearSecondaryShelves()
         markSecondaryUnresolved(item)
         renderPrimary(item, fullDetails)
+        schedulePendingDetailsRestore()
         scroll.scrollTo(0, 0)
         loadDetails(item.id)
     }
@@ -1177,7 +1845,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun metadataText(item: MediaItem): String {
-        val runtime = item.runtimeTicks.takeIf { it > 0L && item.type != "Series" }?.let { "${it / 10_000_000L / 60L} min" }
+        val runtime = item.runtimeTicks.takeIf {
+            it > 0L &&
+                !item.type.equals("Series", ignoreCase = true) &&
+                !item.type.equals("Movie", ignoreCase = true)
+        }?.let { "${it / 10_000_000L / 60L} min" }
         return TextSanitizer.formatMetadata(item.productionYear ?: item.year, item.officialRating, runtime)
     }
 
@@ -1221,6 +1893,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         private const val AUDIO_DESCRIPTION = "Choose audio track"
         private const val SUBTITLE_DESCRIPTION = "Choose subtitle track"
         private const val SPEED_DESCRIPTION = "Choose connection speed"
+        private const val SERIES_DESCRIPTION = "View series details"
+        private const val VIEW_SERIES_FOCUS_TAG = "details-action-view-series"
         private const val WORK_DETAILS = "details"
         private const val WORK_PLAYBACK_INFO = "playback_info"
         private const val WORK_SERIES_PLAY = "series_play"

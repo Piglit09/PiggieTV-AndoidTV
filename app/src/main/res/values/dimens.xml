@@ -36,6 +36,14 @@
     <dimen name="tv_hero_button_height">40dp</dimen>
     <dimen name="tv_hero_button_text_size">14sp</dimen>
 
+    <!-- Details: compact controls and identity artwork. Kept separate from discovery heroes. -->
+    <dimen name="tv_details_action_height">34dp</dimen>
+    <dimen name="tv_details_action_text_size">11sp</dimen>
+    <dimen name="tv_details_action_padding_horizontal">10dp</dimen>
+    <dimen name="tv_details_action_icon_size">16dp</dimen>
+    <dimen name="tv_details_logo_width">220dp</dimen>
+    <dimen name="tv_details_logo_height">48dp</dimen>
+
     <!-- Cards -->
     <dimen name="tv_poster_width">100dp</dimen>
     <dimen name="tv_poster_height">150dp</dimen>
@@ -62,7 +70,6 @@
     <dimen name="tv_avatar_size">64dp</dimen>
     <dimen name="tv_rating_icon_size">18dp</dimen>
     <dimen name="tv_rating_icon_size_small">12dp</dimen>
-    <dimen name="tv_hero_logo_max_width_expanded">300dp</dimen>
     <!-- Bounded catalog viewport: a RecyclerView must not be wrap-content
          measured inside the route ScrollView on low-memory TV devices. -->
     <dimen name="tv_catalog_grid_height">360dp</dimen>

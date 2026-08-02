@@ -203,7 +203,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadItem(session: NativeSession, itemId: String): MediaItem {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,CriticRating,People"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,CriticRating,People,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
         val endpoint = session.serverUrl + "/Users/" + user + "/Items/" + encode(itemId) + "?Fields=" + fields
         return parseItem(JSONObject(request(endpoint, token = session.token)))
     }
@@ -217,14 +217,14 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadEpisodes(session: NativeSession, seriesId: String, seasonId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Episodes?SeasonId=" + encode(seasonId) + "&UserId=" + user + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadNextUpForSeries(session: NativeSession, seriesId: String): MediaItem? {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber,ParentIndexNumber"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
         val endpoint = session.serverUrl + "/Shows/NextUp?UserId=" + user + "&SeriesId=" + seriesId + "&Fields=" + fields
         return runCatching { parseItems(request(endpoint, token = session.token)).firstOrNull() }.getOrNull()
     }
@@ -638,9 +638,9 @@ class JellyfinNativeApi(private val context: Context) {
             title = item.optString("Name").ifBlank { "Untitled" },
             type = item.optString("Type"),
             year = item.optInt("ProductionYear", 0).takeIf { it > 0 }?.toString(),
-            imageTag = imageTags?.optString("Primary"),
-            backdropTag = imageTags?.optString("Backdrop"),
-            logoTag = imageTags?.optString("Logo"),
+            imageTag = imageTags?.nonBlankString("Primary"),
+            backdropTag = imageTags?.nonBlankString("Backdrop"),
+            logoTag = imageTags?.nonBlankString("Logo"),
             seriesName = item.optString("SeriesName").ifBlank { null },
             episodeLabel = label,
             playbackPositionTicks = userData?.optLong("PlaybackPositionTicks", 0L) ?: 0L,
@@ -666,6 +666,17 @@ class JellyfinNativeApi(private val context: Context) {
             criticRating = item.optDouble("CriticRating", 0.0).toFloat().takeIf { it > 0 },
             director = directorName,
             people = people,
+            backdropImageTags = item.nonBlankStrings("BackdropImageTags"),
+            thumbImageTag = imageTags?.nonBlankString("Thumb"),
+            parentBackdropItemId = item.nonBlankString("ParentBackdropItemId"),
+            parentBackdropImageTags = item.nonBlankStrings("ParentBackdropImageTags"),
+            parentLogoItemId = item.nonBlankString("ParentLogoItemId"),
+            parentLogoImageTag = item.nonBlankString("ParentLogoImageTag"),
+            parentPrimaryImageItemId = item.nonBlankString("ParentPrimaryImageItemId"),
+            parentPrimaryImageTag = item.nonBlankString("ParentPrimaryImageTag"),
+            parentThumbItemId = item.nonBlankString("ParentThumbItemId"),
+            parentThumbImageTag = item.nonBlankString("ParentThumbImageTag"),
+            seriesPrimaryImageTag = item.nonBlankString("SeriesPrimaryImageTag"),
             audioTracks = playbackTracks.audioTracks,
             subtitleTracks = playbackTracks.subtitleTracks,
             mediaSourceId = playbackTracks.mediaSourceId
@@ -690,7 +701,21 @@ class JellyfinNativeApi(private val context: Context) {
     private fun maskIdentifier(value: String): String = if (value.length <= 8) "****" else value.take(4) + "..." + value.takeLast(4)
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
 
+    private fun JSONObject.nonBlankString(name: String): String? =
+        optString(name).takeUnless(String::isBlank)
+
+    private fun JSONObject.nonBlankStrings(name: String): List<String> {
+        val values = optJSONArray(name) ?: return emptyList()
+        return List(values.length()) { values.optString(it) }.filter(String::isNotBlank)
+    }
+
     private companion object {
+        const val DETAILS_ARTWORK_FIELDS =
+            "BackdropImageTags,ParentBackdropItemId,ParentBackdropImageTags," +
+                "ParentLogoItemId,ParentLogoImageTag,ParentPrimaryImageItemId," +
+                "ParentPrimaryImageTag,ParentThumbItemId,ParentThumbImageTag," +
+                "SeriesPrimaryImageTag"
+
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null
     }

@@ -6,7 +6,7 @@ object DiscoveryQueryPlanner {
             "ParentBackdropImageTags,ParentLogoItemId,ParentLogoImageTag," +
             "ParentPrimaryImageItemId,ParentPrimaryImageTag,ProductionYear,UserData," +
             "OfficialRating,CommunityRating,Genres,RunTimeTicks," +
-            "SeriesName,IndexNumber,ParentIndexNumber,Overview"
+            "SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,Overview"
 
     const val RECOMMENDATION_FIELDS = CARD_FIELDS
 

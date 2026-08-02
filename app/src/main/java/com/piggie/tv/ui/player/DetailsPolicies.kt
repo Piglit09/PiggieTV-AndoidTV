@@ -24,16 +24,16 @@ data class DetailsArtworkRef(
 object DetailsArtworkPolicy {
     fun posterCandidates(item: MediaItem): List<DetailsArtworkRef> = buildList {
         if (item.type == "Episode") {
-            item.parentPrimaryImageTag?.let {
+            item.parentPrimaryImageTag?.takeIf(String::isNotBlank)?.let {
                 add(DetailsArtworkRef(item.parentPrimaryImageItemId ?: item.seriesId ?: item.id, DetailsArtworkKind.PRIMARY, it))
             }
-            item.seriesPrimaryImageTag?.let {
+            item.seriesPrimaryImageTag?.takeIf(String::isNotBlank)?.let {
                 add(DetailsArtworkRef(item.seriesId ?: item.id, DetailsArtworkKind.PRIMARY, it))
             }
         } else {
-            item.imageTag?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.PRIMARY, it)) }
-            item.thumbImageTag?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.THUMB, it)) }
-            item.parentPrimaryImageTag?.let {
+            item.imageTag?.takeIf(String::isNotBlank)?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.PRIMARY, it)) }
+            item.thumbImageTag?.takeIf(String::isNotBlank)?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.THUMB, it)) }
+            item.parentPrimaryImageTag?.takeIf(String::isNotBlank)?.let {
                 add(DetailsArtworkRef(item.parentPrimaryImageItemId ?: item.id, DetailsArtworkKind.PRIMARY, it))
             }
         }
@@ -42,9 +42,9 @@ object DetailsArtworkPolicy {
     fun poster(item: MediaItem): DetailsArtworkRef? = posterCandidates(item).firstOrNull()
 
     fun episodeThumbnailCandidates(item: MediaItem): List<DetailsArtworkRef> = buildList {
-        item.thumbImageTag?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.THUMB, it)) }
-        item.imageTag?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.PRIMARY, it)) }
-        item.parentThumbImageTag?.let {
+        item.thumbImageTag?.takeIf(String::isNotBlank)?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.THUMB, it)) }
+        item.imageTag?.takeIf(String::isNotBlank)?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.PRIMARY, it)) }
+        item.parentThumbImageTag?.takeIf(String::isNotBlank)?.let {
             add(DetailsArtworkRef(item.parentThumbItemId ?: item.seriesId ?: item.id, DetailsArtworkKind.THUMB, it))
         }
     }.distinct()
@@ -54,13 +54,13 @@ object DetailsArtworkPolicy {
 
     fun logoCandidates(item: MediaItem): List<DetailsArtworkRef> = buildList {
         if (item.type == "Episode") {
-            item.parentLogoImageTag?.let {
+            item.parentLogoImageTag?.takeIf(String::isNotBlank)?.let {
                 add(DetailsArtworkRef(item.parentLogoItemId ?: item.seriesId ?: item.id, DetailsArtworkKind.LOGO, it))
             }
         }
-        item.logoTag?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.LOGO, it)) }
+        item.logoTag?.takeIf(String::isNotBlank)?.let { add(DetailsArtworkRef(item.id, DetailsArtworkKind.LOGO, it)) }
         if (item.type != "Episode") {
-            item.parentLogoImageTag?.let {
+            item.parentLogoImageTag?.takeIf(String::isNotBlank)?.let {
                 add(DetailsArtworkRef(item.parentLogoItemId ?: item.seriesId ?: item.id, DetailsArtworkKind.LOGO, it))
             }
         }
@@ -69,8 +69,9 @@ object DetailsArtworkPolicy {
     fun logo(item: MediaItem): DetailsArtworkRef? = logoCandidates(item).firstOrNull()
 
     fun backdropCandidates(item: MediaItem): List<DetailsArtworkRef> = buildList {
-        val ownTag = item.backdropImageTags.firstOrNull() ?: item.backdropTag
-        val parentTag = item.parentBackdropImageTags.firstOrNull()
+        val ownTag = item.backdropImageTags.firstOrNull(String::isNotBlank)
+            ?: item.backdropTag?.takeIf(String::isNotBlank)
+        val parentTag = item.parentBackdropImageTags.firstOrNull(String::isNotBlank)
         if (item.type == "Episode") {
             parentTag?.let {
                 add(DetailsArtworkRef(item.parentBackdropItemId ?: item.seriesId ?: item.id, DetailsArtworkKind.BACKDROP, it))
@@ -164,6 +165,28 @@ object SeasonEpisodeEntryPolicy {
             episodesLoading -> SeasonEpisodeEntryDecision.WAIT_FOR_EPISODES
             else -> SeasonEpisodeEntryDecision.PASS_THROUGH
         }
+}
+
+enum class SeasonSelectionDecision {
+    FOCUS_LOADED_EPISODES,
+    LOAD_AND_FOCUS_EPISODES,
+    LOAD_WITHOUT_MOVING_FOCUS
+}
+
+/**
+ * A background first-season load must not steal focus from the action row. A center-button
+ * selection, however, is an explicit request to enter that season's episode shelf.
+ */
+object SeasonSelectionPolicy {
+    fun decide(
+        userInitiated: Boolean,
+        isCurrentSeason: Boolean,
+        hasFocusableEpisode: Boolean
+    ): SeasonSelectionDecision = when {
+        !userInitiated -> SeasonSelectionDecision.LOAD_WITHOUT_MOVING_FOCUS
+        isCurrentSeason && hasFocusableEpisode -> SeasonSelectionDecision.FOCUS_LOADED_EPISODES
+        else -> SeasonSelectionDecision.LOAD_AND_FOCUS_EPISODES
+    }
 }
 
 enum class AsyncShelfState {
@@ -310,6 +333,65 @@ object MediaDetailsSeedStore {
                     listOf(person.id, person.name, person.role, person.type, person.primaryImageTag)
                 )
             } + item.audioTracks.size * 160L + item.subtitleTracks.size * 160L
+    }
+}
+
+/** Resolves the only valid parent-details destination exposed from an episode. */
+object EpisodeSeriesNavigationPolicy {
+    fun seriesId(item: MediaItem): String? {
+        if (!item.type.equals("Episode", ignoreCase = true)) return null
+        return item.seriesId
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != item.id }
+    }
+}
+
+/**
+ * A lightweight discovery item can contain episode ancestry that a later details response omits.
+ * Keep that route identity while still allowing every value returned by full details to win.
+ */
+object DetailsNavigationMetadataPolicy {
+    fun merge(previous: MediaItem?, details: MediaItem): MediaItem {
+        if (previous?.id != details.id) return details
+        return details.copy(
+            imageTag = details.imageTag ?: previous.imageTag,
+            backdropTag = details.backdropTag ?: previous.backdropTag,
+            logoTag = details.logoTag ?: previous.logoTag,
+            seriesId = details.seriesId ?: previous.seriesId,
+            seasonId = details.seasonId ?: previous.seasonId,
+            seriesName = details.seriesName ?: previous.seriesName,
+            indexNumber = details.indexNumber ?: previous.indexNumber,
+            parentIndexNumber = details.parentIndexNumber ?: previous.parentIndexNumber,
+            episodeLabel = details.episodeLabel ?: previous.episodeLabel,
+            backdropImageTags = details.backdropImageTags.ifEmpty { previous.backdropImageTags },
+            thumbImageTag = details.thumbImageTag ?: previous.thumbImageTag,
+            parentBackdropItemId = details.parentBackdropItemId ?: previous.parentBackdropItemId,
+            parentBackdropImageTags = details.parentBackdropImageTags.ifEmpty { previous.parentBackdropImageTags },
+            parentLogoItemId = details.parentLogoItemId ?: previous.parentLogoItemId,
+            parentLogoImageTag = details.parentLogoImageTag ?: previous.parentLogoImageTag,
+            parentPrimaryImageItemId = details.parentPrimaryImageItemId ?: previous.parentPrimaryImageItemId,
+            parentPrimaryImageTag = details.parentPrimaryImageTag ?: previous.parentPrimaryImageTag,
+            parentThumbItemId = details.parentThumbItemId ?: previous.parentThumbItemId,
+            parentThumbImageTag = details.parentThumbImageTag ?: previous.parentThumbImageTag,
+            seriesPrimaryImageTag = details.seriesPrimaryImageTag ?: previous.seriesPrimaryImageTag
+        )
+    }
+}
+
+object DetailsTimePolicy {
+    private const val TICKS_PER_MINUTE = 600_000_000L
+    private const val TICKS_PER_MILLISECOND = 10_000L
+
+    fun playTime(runtimeTicks: Long): String? {
+        if (runtimeTicks <= 0L) return null
+        val totalMinutes = runtimeTicks / TICKS_PER_MINUTE
+        return String.format(java.util.Locale.US, "%02d:%02d", totalMinutes / 60L, totalMinutes % 60L)
+    }
+
+    fun endsAtMillis(nowMillis: Long, runtimeTicks: Long, playbackPositionTicks: Long): Long? {
+        if (runtimeTicks <= 0L) return null
+        val remainingTicks = (runtimeTicks - playbackPositionTicks.coerceAtLeast(0L)).coerceAtLeast(0L)
+        return nowMillis + remainingTicks / TICKS_PER_MILLISECOND
     }
 }
 

@@ -204,6 +204,7 @@ class MediaCardTest {
                 session,
                 api
             )
+            assertEquals("movie", card.tag)
             measureCard(card)
             val heightWithProgress = card.measuredHeight
             assertEquals(View.VISIBLE, holder.progress?.visibility)
@@ -417,6 +418,7 @@ class MediaCardTest {
             assertNull(card.contentDescription)
             assertNull(holder.image.contentDescription)
             assertNull(holder.image.tag)
+            assertNull(card.tag)
             assertSame(holder.placeholder, holder.image.drawable)
             assertEquals(View.VISIBLE, holder.image.visibility)
             assertEquals(ImageView.ScaleType.CENTER_CROP, holder.image.scaleType)
