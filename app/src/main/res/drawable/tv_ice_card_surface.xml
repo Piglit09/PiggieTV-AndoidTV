@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Opaque artwork covers the upper card, so SAFE_STATIC_GLASS only blends the
+         visible metadata body instead of paying for a full-card translucent gradient. -->
+    <item
+        android:height="@dimen/tv_card_metadata_surface_height"
+        android:gravity="bottom">
+        <shape android:shape="rectangle">
+            <solid android:color="#7024103D" />
+            <corners
+                android:bottomLeftRadius="@dimen/tv_media_artwork_corner_radius"
+                android:bottomRightRadius="@dimen/tv_media_artwork_corner_radius" />
+        </shape>
+    </item>
+</layer-list>

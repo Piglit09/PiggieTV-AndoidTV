@@ -12,21 +12,15 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
-import coil.dispose
 import coil.load
 import com.piggie.tv.R
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
-import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.playback.WaveProgressModel
 import com.piggie.tv.data.session.SecureSessionStore
-import com.piggie.tv.diagnostics.PtvDiagnosticsManager
-import com.piggie.tv.diagnostics.PtvRedactor
 import com.piggie.tv.ui.player.NowPlayingActivity
 import com.piggie.tv.ui.layout.TvLayoutProfileResolver
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
@@ -69,9 +63,8 @@ object NativePtvShell {
         }
         root.addView(container, ViewGroup.LayoutParams(-1, -1))
 
-        val header = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val header = FrameLayout(activity).apply {
+            id = R.id.ptv_header
             setPadding(
                 activity.dim(R.dimen.tv_screen_margin_horizontal),
                 activity.dim(R.dimen.tv_screen_margin_vertical),
@@ -85,10 +78,10 @@ object NativePtvShell {
             contentDescription = activity.getString(R.string.app_name)
             scaleType = ImageView.ScaleType.FIT_CENTER
             setImageResource(R.drawable.app_logo)
-        }, LinearLayout.LayoutParams(
+        }, FrameLayout.LayoutParams(
             activity.dim(R.dimen.tv_header_logo_width),
             activity.dim(R.dimen.tv_header_logo_height)
-        ))
+        ).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
 
         // 2. Navigation Rail (In between Logo and Profile)
         val buttons = linkedMapOf<NativeRoute, Button>()
@@ -132,7 +125,11 @@ object NativePtvShell {
             clipToPadding = false
             setPadding(activity.dim(R.dimen.tv_spacing_large), 0, activity.dim(R.dimen.tv_spacing_large), 0)
             addView(rail)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER
+        ))
 
         // 3. Profile Button
         val profileButton = Button(activity).apply {
@@ -150,9 +147,10 @@ object NativePtvShell {
         buttons[NativeRoute.PROFILE] = profileButton
         header.addView(
             profileButton,
-            LinearLayout.LayoutParams(
+            FrameLayout.LayoutParams(
                 activity.dim(R.dimen.tv_profile_button_width),
-                activity.dim(R.dimen.tv_profile_button_height)
+                activity.dim(R.dimen.tv_profile_button_height),
+                Gravity.END or Gravity.CENTER_VERTICAL
             )
         )
         
@@ -209,6 +207,29 @@ object NativePtvShell {
         info.addView(artist)
         container.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
 
+        // Static waveform geometry: only the played fraction invalidates at the bounded music
+        // progress cadence. No animator, shader allocation, or continuously changing path.
+        val waveProgress = PtvWaveProgressView(activity).apply {
+            setWaveColors(PTVColors.accent, PTVColors.buttonSecondary)
+        }
+        container.addView(
+            waveProgress,
+            LinearLayout.LayoutParams(
+                activity.dim(R.dimen.tv_hero_button_width),
+                activity.dim(R.dimen.tv_rating_icon_size)
+            ).apply {
+                marginStart = activity.dim(R.dimen.tv_spacing_medium)
+            }
+        )
+        val elapsed = miniPlayerTime(activity)
+        container.addView(
+            elapsed,
+            LinearLayout.LayoutParams(
+                activity.dim(R.dimen.tv_player_timestamp_width),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
         val playPause = ImageView(activity).apply {
             setImageResource(android.R.drawable.ic_media_pause)
             isClickable = true
@@ -233,6 +254,12 @@ object NativePtvShell {
                     playPause.setImageResource(if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
                 }
             }
+            activity.lifecycleScope.launch {
+                MusicPlaybackManager.progress.collect { snapshot ->
+                    waveProgress.render(snapshot)
+                    elapsed.text = WaveProgressModel.formatTime(snapshot.positionMs)
+                }
+            }
         }
 
         return container
@@ -242,7 +269,7 @@ object NativePtvShell {
         setTextColor(activity.getColor(R.color.tv_text_secondary))
         setTextSizeRes(R.dimen.tv_text_size_metadata)
         gravity = Gravity.CENTER
-        text = "0:00"
+        text = activity.getString(R.string.playback_time_zero)
         maxLines = 1
     }
 }

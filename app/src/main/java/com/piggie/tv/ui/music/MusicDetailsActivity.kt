@@ -1289,7 +1289,7 @@ class MusicDetailsActivity : AppCompatActivity() {
             }
 
             override fun onViewRecycled(holder: MediaCardHolder) {
-                holder.image.dispose()
+                MediaCardFactory.recycleView(holder)
                 super.onViewRecycled(holder)
             }
 

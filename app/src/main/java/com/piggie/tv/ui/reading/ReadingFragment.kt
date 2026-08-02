@@ -12,7 +12,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
-import coil.dispose
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
@@ -213,7 +212,7 @@ class ReadingFragment : Fragment() {
 
         override fun getItemCount(): Int = items.size
         override fun onViewRecycled(holder: MediaCardHolder) {
-            holder.image.dispose()
+            MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
             super.onViewRecycled(holder)
         }

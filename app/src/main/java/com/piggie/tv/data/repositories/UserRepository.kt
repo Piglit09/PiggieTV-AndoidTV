@@ -3,6 +3,8 @@ package com.piggie.tv.data.repositories
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.ui.player.MediaDetailsSeedStore
 
 class UserRepository(
     private val api: JellyfinNativeApi,
@@ -18,5 +20,7 @@ class UserRepository(
 
     fun signOut() {
         store.clear()
+        DiscoveryManager.clearForLogout()
+        MediaDetailsSeedStore.clear()
     }
 }

@@ -3,10 +3,14 @@ package com.piggie.tv.data.api
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import android.os.SystemClock
 import com.piggie.tv.data.models.*
+import com.piggie.tv.data.discovery.DiscoveryQueryPlanner
 import com.piggie.tv.data.playback.ImageSizing
 import com.piggie.tv.data.playback.PlaybackProgress
 import com.piggie.tv.data.playback.NextEpisodeSelector
+import com.piggie.tv.data.playback.PlaybackDeviceProfile
+import com.piggie.tv.data.playback.PlaybackMediaSourcePolicy
 import com.piggie.tv.util.JellyfinServerUrl
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,8 +39,23 @@ data class NativeDiagnostics(
 )
 
 data class PlaybackInfoMetadata(
+    val mediaSourceId: String?,
     val audioTracks: List<AudioTrack>,
-    val subtitleTracks: List<SubtitleTrack>
+    val subtitleTracks: List<SubtitleTrack>,
+    val mediaSources: List<PlaybackMediaSourceMetadata> = emptyList()
+) {
+    fun forMediaSource(mediaSourceId: String): PlaybackMediaSourceMetadata? =
+        mediaSources.firstOrNull { it.mediaSourceId.equals(mediaSourceId, ignoreCase = true) }
+}
+
+data class PlaybackMediaSourceMetadata(
+    val mediaSourceId: String,
+    val audioTracks: List<AudioTrack>,
+    val subtitleTracks: List<SubtitleTrack>,
+    val supportsDirectPlay: Boolean,
+    val supportsDirectStream: Boolean,
+    val supportsTranscoding: Boolean,
+    val bitrate: Long?
 )
 
 enum class SessionOrigin { STORED, QUICK_CONNECT, PASSWORD }
@@ -51,9 +70,21 @@ class JellyfinNativeApi(private val context: Context) {
         prefs.getString("id", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("id", it).apply() }
     }
     private val transport by lazy { NativeHttpTransport(::authorization) }
+    private val requestScope = ThreadLocal<NativeRequestScope?>()
+    private val parseDurationMs = ThreadLocal<Long?>()
 
     fun withRequestScope(scope: NativeRequestScope, action: () -> Unit) {
-        action()
+        val previous = requestScope.get()
+        requestScope.set(scope)
+        try {
+            action()
+        } finally {
+            if (previous == null) {
+                requestScope.remove()
+            } else {
+                requestScope.set(previous)
+            }
+        }
     }
 
     fun cancelInFlight() {
@@ -61,6 +92,12 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     fun cancelInFlightRequests() = cancelInFlight()
+
+    /** Returns phase timing for the request most recently completed on this worker thread. */
+    fun consumeNetworkDiagnostic(): SafeNetworkDiagnostic? = transport.consumeThreadDiagnostic()
+
+    /** Exact JSON-to-model time for the most recent parse on this worker thread. */
+    fun consumeParseDurationMs(): Long? = parseDurationMs.get().also { parseDurationMs.remove() }
 
     fun ensureDeviceId(): String {
         return deviceId.also { id ->
@@ -194,9 +231,16 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun fetchNextUp(session: NativeSession, limit: Int = 18): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber,ParentIndexNumber"
+        val fields = DiscoveryQueryPlanner.CARD_FIELDS
         val endpoint = session.serverUrl + "/Shows/NextUp?UserId=" + user + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
+    }
+
+    fun fetchResume(session: NativeSession, itemTypes: List<String>, limit: Int = 16): List<MediaItem> {
+        val user = encode(session.userId)
+        val params = DiscoveryQueryPlanner.resumeParameters(itemTypes, limit)
+        val query = params.entries.joinToString("&") { "${it.key}=${encode(it.value)}" }
+        return parseItems(request("${session.serverUrl}/Users/$user/Items/Resume?$query", token = session.token))
     }
 
     fun loadNextEpisode(session: NativeSession, current: MediaItem): MediaItem? {
@@ -272,10 +316,10 @@ class JellyfinNativeApi(private val context: Context) {
         session.serverUrl + "/Items/" + encode(itemId) + "/Images/Logo?maxWidth=" + maxWidth + "&quality=90" +
             tag?.takeIf(String::isNotBlank)?.let { "&tag=" + encode(it) }.orEmpty()
 
-    fun fetchRecommendations(session: NativeSession, itemType: String? = null): List<MediaItem> {
+    fun fetchRecommendations(session: NativeSession, itemType: String? = null, limit: Int = 16): List<MediaItem> {
         val user = encode(session.userId)
         val typeParam = itemType?.let { "&includeItemTypes=$it" } ?: ""
-        val endpoint = "${session.serverUrl}/Users/$user/Suggestions?Fields=PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,OfficialRating,Genres,CriticRating,People&Limit=24$typeParam"
+        val endpoint = "${session.serverUrl}/Users/$user/Suggestions?Fields=${encode(DiscoveryQueryPlanner.RECOMMENDATION_FIELDS)}&Limit=$limit$typeParam"
         return parseItems(request(endpoint, token = session.token))
     }
 
@@ -292,32 +336,56 @@ class JellyfinNativeApi(private val context: Context) {
         return parseItems(request(endpoint, token = session.token))
     }
 
-    fun loadPlaybackInfoMetadata(session: NativeSession, itemId: String, bitrate: Long): PlaybackInfoMetadata {
-        val profile = JSONObject().apply { put("MaxStreamingBitrate", bitrate) }
-        val response = JSONObject(request(session.serverUrl + "/Items/" + encode(itemId) + "/PlaybackInfo?UserId=" + encode(session.userId), method = "POST", body = profile.toString(), token = session.token))
+    fun loadPlaybackInfoMetadata(
+        session: NativeSession,
+        itemId: String,
+        bitrate: Long,
+        preferredMediaSourceId: String? = null
+    ): PlaybackInfoMetadata {
+        val profile = PlaybackDeviceProfile.build(
+            bitrate.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+        )
+        val response = JSONObject(
+            requestPlaybackInfo(
+                session = session,
+                itemId = itemId,
+                profile = profile,
+                mediaSourceId = preferredMediaSourceId
+            )
+        )
         val mediaSources = response.optJSONArray("MediaSources")
-        val firstSource = mediaSources?.optJSONObject(0)
-        val mediaStreams = firstSource?.optJSONArray("MediaStreams")
-
-        val audioTracks = mutableListOf<AudioTrack>()
-        val subtitleTracks = mutableListOf<SubtitleTrack>()
-
-        if (mediaStreams != null) {
-            for (i in 0 until mediaStreams.length()) {
-                val stream = mediaStreams.optJSONObject(i) ?: continue
-                val type = stream.optString("Type")
-                val index = stream.optInt("Index")
-                val language = stream.optString("Language").takeIf { it.isNotBlank() }
-                val title = stream.optString("DisplayTitle").takeUnless { it.isNullOrBlank() }
-                val isDefault = stream.optBoolean("IsDefault", false)
-
-                when (type) {
-                    "Audio" -> audioTracks.add(AudioTrack(index, language, title, stream.optString("Codec"), isDefault, stream.optInt("Channels").takeIf { it > 0 }))
-                    "Subtitle" -> subtitleTracks.add(SubtitleTrack(index, language, title, isDefault, stream.optString("DeliveryMethod"), stream.optBoolean("IsForced", false), stream.optString("Codec")))
+        val parsedSources = JellyfinPlaybackMetadataParser.parseSources(mediaSources)
+        val selectedPlan = PlaybackMediaSourcePolicy.choose(
+            candidates = parsedSources.mapNotNull(ParsedPlaybackTracks::asCandidate),
+            preferredMediaSourceId = preferredMediaSourceId,
+            maxAllowedBitrate = bitrate.takeIf { it > 0L }
+        )
+        // Metadata discovery must remain useful with older Jellyfin servers that return streams
+        // but omit the Supports* flags. Playback negotiation still enforces actual playability.
+        val parsed = selectedPlan?.source?.sourceIndex?.let(parsedSources::getOrNull)
+            ?: preferredMediaSourceId?.let { preferred ->
+                parsedSources.firstOrNull {
+                    it.mediaSourceId.equals(preferred, ignoreCase = true)
                 }
             }
-        }
-        return PlaybackInfoMetadata(audioTracks, subtitleTracks)
+            ?: parsedSources.firstOrNull()
+        return PlaybackInfoMetadata(
+            mediaSourceId = parsed?.mediaSourceId,
+            audioTracks = parsed?.audioTracks.orEmpty(),
+            subtitleTracks = parsed?.subtitleTracks.orEmpty(),
+            mediaSources = parsedSources.mapNotNull { source ->
+                val sourceId = source.mediaSourceId ?: return@mapNotNull null
+                PlaybackMediaSourceMetadata(
+                    mediaSourceId = sourceId,
+                    audioTracks = source.audioTracks,
+                    subtitleTracks = source.subtitleTracks,
+                    supportsDirectPlay = source.supportsDirectPlay,
+                    supportsDirectStream = source.supportsDirectStream,
+                    supportsTranscoding = source.supportsTranscoding,
+                    bitrate = source.bitrate
+                )
+            }
+        )
     }
 
     fun authorization(token: String?): String = JellyfinAuthorizationHeader.build(deviceId, appVersion(), token)
@@ -326,13 +394,36 @@ class JellyfinNativeApi(private val context: Context) {
         session: NativeSession,
         itemId: String,
         profile: JSONObject,
+        mediaSourceId: String? = null,
+        startTimeTicks: Long = 0L,
         audioStreamIndex: Int? = null,
         subtitleStreamIndex: Int? = null
     ): String {
+        val safeStartTimeTicks = startTimeTicks.coerceAtLeast(0L)
+        val selectedMediaSourceId = mediaSourceId?.takeIf(String::isNotBlank)
         var endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/PlaybackInfo?UserId=" + encode(session.userId)
+        selectedMediaSourceId?.let { endpoint += "&MediaSourceId=${encode(it)}" }
+        if (safeStartTimeTicks > 0L) endpoint += "&StartTimeTicks=$safeStartTimeTicks"
         audioStreamIndex?.let { endpoint += "&AudioStreamIndex=$it" }
         subtitleStreamIndex?.let { endpoint += "&SubtitleStreamIndex=$it" }
-        return request(endpoint, method = "POST", body = profile.toString(), token = session.token)
+
+        val playbackInfoDto = JSONObject().apply {
+            put("UserId", session.userId)
+            put("StartTimeTicks", safeStartTimeTicks)
+            profile.opt("MaxStreamingBitrate")
+                ?.takeUnless { it == JSONObject.NULL }
+                ?.let { put("MaxStreamingBitrate", it) }
+            put("DeviceProfile", profile)
+            selectedMediaSourceId?.let { put("MediaSourceId", it) }
+            audioStreamIndex?.let { put("AudioStreamIndex", it) }
+            subtitleStreamIndex?.let { put("SubtitleStreamIndex", it) }
+        }
+        return request(
+            endpoint,
+            method = "POST",
+            body = playbackInfoDto.toString(),
+            token = session.token
+        )
     }
 
     fun reportPlaying(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
@@ -473,7 +564,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadPageBytes(session: NativeSession, bookId: String, pageIndex: Int): ByteArray {
         var bytes = ByteArray(0)
-        transport.download(getPageImageUrl(session, bookId, pageIndex), session.token) { input ->
+        transport.download(getPageImageUrl(session, bookId, pageIndex), session.token, requestScope.get()) { input ->
             bytes = input.readBytes()
         }
         return bytes
@@ -481,12 +572,12 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun downloadFile(session: NativeSession, itemId: String, action: (java.io.InputStream) -> Unit) {
         val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/Download"
-        transport.download(endpoint, session.token, action)
+        transport.download(endpoint, session.token, requestScope.get(), action)
     }
 
     fun probeImage(session: NativeSession, item: MediaItem, presentation: MediaCardPresentation): Boolean {
         var read = -1
-        transport.download(imageUrl(session, item, presentation), session.token) { input ->
+        transport.download(imageUrl(session, item, presentation), session.token, requestScope.get()) { input ->
             read = input.read(ByteArray(1024))
         }
         return read > 0
@@ -506,8 +597,13 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     private fun parseItems(body: String): List<MediaItem> {
-        val array = JSONObject(body).optJSONArray("Items") ?: JSONArray()
-        return List(array.length()) { parseItem(array.optJSONObject(it)) }
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            val array = JSONObject(body).optJSONArray("Items") ?: JSONArray()
+            List(array.length()) { parseItem(array.optJSONObject(it)) }
+        } finally {
+            parseDurationMs.set(SystemClock.elapsedRealtime() - started)
+        }
     }
 
     private fun parseItem(item: JSONObject): MediaItem {
@@ -523,23 +619,9 @@ class JellyfinNativeApi(private val context: Context) {
             else -> null
         }
         val artists = item.optJSONArray("Artists")?.let { arr -> List(arr.length()) { arr.optString(it) } } ?: emptyList()
-        val mediaStreams = item.optJSONArray("MediaSources")?.optJSONObject(0)?.optJSONArray("MediaStreams")
-        val audioTracks = mutableListOf<AudioTrack>()
-        val subtitleTracks = mutableListOf<SubtitleTrack>()
-        if (mediaStreams != null) {
-            for (i in 0 until mediaStreams.length()) {
-                val stream = mediaStreams.optJSONObject(i) ?: continue
-                val type = stream.optString("Type")
-                val index = stream.optInt("Index")
-                val language = stream.optString("Language").takeIf { it.isNotBlank() }
-                val title = stream.optString("DisplayTitle").takeUnless { it.isNullOrBlank() }
-                val isDefault = stream.optBoolean("IsDefault", false)
-                when (type) {
-                    "Audio" -> audioTracks.add(AudioTrack(index, language, title, stream.optString("Codec"), isDefault, stream.optInt("Channels").takeIf { it > 0 }))
-                    "Subtitle" -> subtitleTracks.add(SubtitleTrack(index, language, title, isDefault, stream.optString("DeliveryMethod"), stream.optBoolean("IsForced", false), stream.optString("Codec")))
-                }
-            }
-        }
+        val playbackTracks = JellyfinPlaybackMetadataParser.parseFirstSource(
+            item.optJSONArray("MediaSources")
+        )
         val peopleArr = item.optJSONArray("People")
         val people = mutableListOf<Person>()
         var directorName: String? = null
@@ -584,14 +666,15 @@ class JellyfinNativeApi(private val context: Context) {
             criticRating = item.optDouble("CriticRating", 0.0).toFloat().takeIf { it > 0 },
             director = directorName,
             people = people,
-            audioTracks = audioTracks,
-            subtitleTracks = subtitleTracks
+            audioTracks = playbackTracks.audioTracks,
+            subtitleTracks = playbackTracks.subtitleTracks,
+            mediaSourceId = playbackTracks.mediaSourceId
         )
     }
 
     private fun request(endpoint: String, method: String = "GET", body: String? = null, token: String? = null): String {
         return try {
-            val response = transport.execute(endpoint, method, body, token)
+            val response = transport.execute(endpoint, method, body, token, requestScope.get())
             lastApiError = null
             lastSuccessAt = System.currentTimeMillis()
             response

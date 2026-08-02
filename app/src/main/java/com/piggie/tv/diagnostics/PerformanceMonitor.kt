@@ -21,13 +21,19 @@ object PerformanceMonitor {
 
     private val refresh = object : Runnable {
         override fun run() {
-            overlay?.text = PtvDiagnosticsManager.overlaySummary()
-            if (overlay != null) handler.postDelayed(this, 2_000L)
+            val currentOverlay = overlay ?: return
+            if (
+                PtvDiagnosticsManager.isEnabled() &&
+                PtvDiagnosticsManager.isOverlayRefreshAllowed()
+            ) {
+                currentOverlay.text = PtvDiagnosticsManager.overlaySummary()
+            }
+            if (overlay === currentOverlay) handler.postDelayed(this, REFRESH_INTERVAL_MS)
         }
     }
 
     fun setVisible(activity: Activity, visible: Boolean) {
-        if (visible) show(activity) else hide()
+        if (visible && PtvDiagnosticsManager.isEnabled()) show(activity) else hide()
     }
 
     fun toggle(activity: Activity) = setVisible(activity, overlay == null)
@@ -38,11 +44,14 @@ object PerformanceMonitor {
         if (owner === activity) hide()
     }
 
+    internal fun onDiagnosticsDisabled() = hide()
+
     private fun show(activity: Activity) {
         if (owner !== activity) hide()
         if (overlay != null) return
         val root = activity.findViewById<ViewGroup>(android.R.id.content)
         overlay = TextView(activity).apply {
+            text = "Diagnostics collecting…"
             setBackgroundColor(0xCC000000.toInt())
             setTextColor(PTVColors.accent)
             setTextSizeRes(R.dimen.tv_text_size_metadata)
@@ -52,7 +61,8 @@ object PerformanceMonitor {
         }
         owner = activity
         root.addView(overlay, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END or Gravity.TOP })
-        handler.post(refresh)
+        handler.removeCallbacks(refresh)
+        handler.postDelayed(refresh, REFRESH_INTERVAL_MS)
     }
 
     private fun hide() {
@@ -62,4 +72,6 @@ object PerformanceMonitor {
         overlay = null
         owner = null
     }
+
+    private const val REFRESH_INTERVAL_MS = 2_000L
 }

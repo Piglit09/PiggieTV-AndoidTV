@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- A real 44%-alpha glass title cap keeps the surface language while avoiding
+         a full-width blend underneath every opaque card in the scrolling well. -->
+    <item
+        android:height="@dimen/tv_shelf_glass_header_height"
+        android:gravity="top">
+        <shape android:shape="rectangle">
+            <solid android:color="#7024103D" />
+            <corners
+                android:topLeftRadius="@dimen/tv_shelf_corner_radius"
+                android:topRightRadius="@dimen/tv_shelf_corner_radius" />
+        </shape>
+    </item>
+    <!-- The complete rounded frame contains title, cards, and every shelf state. -->
+    <item>
+        <shape android:shape="rectangle">
+            <stroke
+                android:width="@dimen/tv_shelf_stroke_width"
+                android:color="#B370459A" />
+            <corners android:radius="@dimen/tv_shelf_corner_radius" />
+        </shape>
+    </item>
+</layer-list>

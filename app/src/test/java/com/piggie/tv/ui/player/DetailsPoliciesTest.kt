@@ -80,6 +80,54 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `full details cannot regress to a later lightweight seed`() {
+        val initialSeed = item("id", "Movie").copy(imageTag = "initial-art")
+        val full = initialSeed.copy(overview = "Full overview", imageTag = "full-art")
+        val lateSeed = initialSeed.copy(overview = null, imageTag = "late-seed-art")
+
+        val state = DetailsContentState()
+            .withSeed(initialSeed)
+            .withFullDetails(full)
+            .withSeed(lateSeed)
+
+        assertTrue(state.hasFullDetails)
+        assertEquals("Full overview", state.item?.overview)
+        assertEquals("full-art", state.item?.imageTag)
+    }
+
+    @Test
+    fun `details seed cache expires and trims deterministically`() {
+        MediaDetailsSeedStore.clear()
+        try {
+            MediaDetailsSeedStore.put(item("seed", "Movie"), nowMs = 1_000L)
+            assertEquals(1, MediaDetailsSeedStore.size(nowMs = 1_000L))
+            assertNull(MediaDetailsSeedStore.getItem("seed", nowMs = 16L * 60L * 1_000L))
+
+            MediaDetailsSeedStore.put(item("seed-2", "Movie"), nowMs = 1_000L)
+            MediaDetailsSeedStore.trimToPercent(0)
+            assertEquals(0, MediaDetailsSeedStore.size(nowMs = 1_000L))
+            assertEquals(0L, MediaDetailsSeedStore.stats(nowMs = 1_000L).estimatedBytes)
+        } finally {
+            MediaDetailsSeedStore.clear()
+        }
+    }
+
+    @Test
+    fun `oversized details seed cannot exceed byte bound`() {
+        MediaDetailsSeedStore.clear()
+        try {
+            MediaDetailsSeedStore.put(
+                item("oversized", "Movie").copy(overview = "x".repeat(600_000)),
+                nowMs = 1_000L
+            )
+
+            assertEquals(0, MediaDetailsSeedStore.size(nowMs = 1_000L))
+        } finally {
+            MediaDetailsSeedStore.clear()
+        }
+    }
+
+    @Test
     fun `season focus graph is deterministic`() {
         assertTrue(
             DetailsInitialFocusPolicy.shouldRequestPrimary(

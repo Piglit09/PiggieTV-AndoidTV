@@ -2,24 +2,39 @@ package com.piggie.tv.diagnostics
 
 import android.content.Context
 import com.piggie.tv.util.CrashReporter
+import com.piggie.tv.data.discovery.DiscoveryDiagnostics
+import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.data.discovery.DiscoveryPage
+import com.piggie.tv.data.discovery.DiscoveryPageDiagnostics
+import com.piggie.tv.data.discovery.ShelfDiagnostic
+import com.piggie.tv.data.discovery.rawCount
+import com.piggie.tv.data.discovery.eligibleCount
+import com.piggie.tv.data.discovery.adapterCount
+import com.piggie.tv.ui.rendering.RenderingCapabilitySnapshot
+import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 data class PtvExportFiles(val json: File, val text: File)
+private data class PtvExportSnapshot(
+    val core: PtvDiagnosticsSnapshot,
+    val discovery: DiscoveryPageDiagnostics,
+    val rendering: RenderingCapabilitySnapshot
+)
 
 object PtvDiagnosticExporter {
     const val EXPORT_DIRECTORY = "diagnostics"
     const val JSON_FILE = "ptv-diagnostics.json"
     const val TEXT_FILE = "ptv-diagnostics.txt"
 
-    fun exportJson(context: Context): String = toJson(snapshot(context)).toString(2)
+    fun exportJson(context: Context): String = toJson(exportSnapshot(context)).toString(2)
 
-    fun exportText(context: Context): String = toText(snapshot(context))
+    fun exportText(context: Context): String = toText(exportSnapshot(context))
 
     fun save(context: Context): PtvExportFiles {
         val directory = File(context.filesDir, EXPORT_DIRECTORY).apply { mkdirs() }
-        val snapshot = snapshot(context)
+        val snapshot = exportSnapshot(context)
         val json = File(directory, JSON_FILE).apply { writeText(toJson(snapshot).toString(2)) }
         val text = File(directory, TEXT_FILE).apply { writeText(toText(snapshot)) }
         return PtvExportFiles(json, text)
@@ -27,10 +42,26 @@ object PtvDiagnosticExporter {
 
     private fun snapshot(context: Context) = PtvDiagnosticsManager.snapshot(CrashReporter.getReports(context))
 
-    fun toJson(snapshot: PtvDiagnosticsSnapshot): JSONObject = JSONObject().apply {
+    private fun exportSnapshot(context: Context) = PtvExportSnapshot(
+        snapshot(context),
+        DiscoveryManager.currentPageDiagnostics(DiscoveryPage.HOME),
+        TvRenderingRuntime.capabilitySnapshot()
+    )
+
+    fun toJson(snapshot: PtvDiagnosticsSnapshot): JSONObject = toJson(
+        PtvExportSnapshot(
+            snapshot,
+            DiscoveryManager.currentPageDiagnostics(DiscoveryPage.HOME),
+            TvRenderingRuntime.capabilitySnapshot()
+        )
+    )
+
+    private fun toJson(export: PtvExportSnapshot): JSONObject = JSONObject().apply {
+        val snapshot = export.core
         put("schemaVersion", 1)
         put("generatedAtMs", System.currentTimeMillis())
         put("device", deviceJson(snapshot.device))
+        put("rendering", renderingJson(export.rendering))
         put("routeTraces", JSONArray(snapshot.routes.map(::routeJson)))
         put("networkTraces", JSONArray(snapshot.network.map(::networkJson)))
         put("imageTraces", JSONArray(snapshot.images.map(::imageJson)))
@@ -41,6 +72,7 @@ object PtvDiagnosticExporter {
         put("performanceSamples", JSONArray(snapshot.performance.map(::performanceJson)))
         put("events", JSONArray(snapshot.events.map(::eventJson)))
         put("testResults", JSONArray(snapshot.testResults.map(::testJson)))
+        put("discovery", discoveryJson(export.discovery))
         put("crashReports", PtvRedactor.text(snapshot.crashReports) ?: JSONObject.NULL)
     }
 
@@ -84,6 +116,22 @@ object PtvDiagnosticExporter {
         put("videoDecoders", JSONArray(value.videoDecoders))
         put("audioCapabilities", value.audioCapabilities)
         put("serverReachability", value.serverReachability)
+    }
+
+    internal fun renderingJson(value: RenderingCapabilitySnapshot) = JSONObject().apply {
+        put("renderingProfile", value.renderingProfile)
+        put("renderingExperiment", value.renderingExperiment)
+        put("visualFeatureLevels", JSONArray(value.visualFeatureLevels))
+        put("staticGlassEnabled", value.staticGlassEnabled)
+        put("shelfGlassEnabled", value.shelfGlassEnabled)
+        put("iceCardEnabled", value.iceCardEnabled)
+        put("progressGradientEnabled", value.progressGradientEnabled)
+        put("enhancedGlassEnabled", value.enhancedGlassEnabled)
+        put("expensiveEffectsEnabled", value.expensiveEffectsEnabled)
+        put("animatedEffectsEnabled", value.animatedEffectsEnabled)
+        put("focusScale", value.focusScale.toDouble())
+        put("focusElevation", value.focusElevation.toDouble())
+        put("blurEnabled", value.blurEnabled)
     }
 
     private fun routeJson(value: PtvRouteTrace) = JSONObject().apply {
@@ -167,7 +215,75 @@ object PtvDiagnosticExporter {
         put("status", value.status.name); put("durationMs", value.durationMs); put("detail", PtvRedactor.text(value.detail))
     }
 
-    fun toText(snapshot: PtvDiagnosticsSnapshot): String = buildString {
+    private fun discoveryJson(snapshot: DiscoveryPageDiagnostics) = JSONObject().apply {
+        val aggregate = snapshot.aggregate
+        put("persistence", "MEMORY_ONLY")
+        put("generationId", aggregate.generationId)
+        put("expected", aggregate.expected); put("defined", aggregate.defined)
+        put("notStarted", aggregate.notStarted)
+        put("queued", aggregate.queued); put("requested", aggregate.requested)
+        put("loading", aggregate.loading); put("content", aggregate.content)
+        put("empty", aggregate.empty); put("failed", aggregate.failed); put("canceled", aggregate.canceled)
+        put("renderedShelves", aggregate.renderedShelves); put("renderedCards", aggregate.renderedCards)
+        put("shelves", JSONArray(snapshot.shelves.map(::shelfJson)))
+    }
+
+    private fun shelfJson(value: ShelfDiagnostic) = JSONObject().apply {
+        put("shelfId", value.shelfId); put("title", value.shelfTitle); put("state", value.finalState.name)
+        put("generationId", value.generationId); put("attemptId", value.attemptId)
+        put("raw", value.rawCount); put("eligible", value.eligibleCount)
+        put("deduped", value.deduplicatedCount); put("adapter", value.adapterCount)
+        put("visible", value.visibleCards ?: 0); put("totalMs", value.elapsedMs)
+        putNullable("queueWaitMs", value.queueWaitMs); putNullable("dnsMs", value.dnsMs)
+        putNullable("connectMs", value.connectMs); putNullable("tlsMs", value.tlsMs)
+        putNullable("requestWriteMs", value.requestWriteMs); putNullable("timeToFirstByteMs", value.timeToFirstByteMs)
+        putNullable("responseReadMs", value.responseReadMs); putNullable("responseBytes", value.responseBytes)
+        putNullable("parseMs", value.parseMs); putNullable("filteringMs", value.filteringMs)
+        putNullable("scoringMs", value.scoringMs); putNullable("dedupeMs", value.dedupeMs)
+        putNullable("adapterBuildMs", value.adapterBuildMs); putNullable("firstCardSubmitMs", value.firstCardSubmitMs)
+        putNullable("firstPosterMs", value.firstPosterMs); putNullable("faultInjectionDelayMs", value.faultInjectionDelayMs)
+        put("cacheHit", value.cacheHit); put("requestAvoided", value.requestAvoided)
+        put("cacheRefreshBypassed", value.cacheRefreshBypassed)
+        putNullable("cacheAgeMs", value.cacheAgeMs); putNullable("cacheTtlRemainingMs", value.cacheTtlRemainingMs)
+        putNullable("cacheEntryBytes", value.cacheEntryBytes); putNullable("cacheKeyCategory", value.cacheKeyCategory)
+        put("inFlightCoalesced", value.inFlightCoalesced); putNullable("sourceShelf", value.cacheSourceShelfId)
+        value.query?.let { query ->
+            val fields = query.filters["Fields"].orEmpty().split(',').filter(String::isNotBlank)
+            val safeFilters = query.filters
+                .filterKeys { it != "Fields" }
+                .mapValues { (key, item) -> if (key.endsWith("Id") || key.endsWith("Ids")) "[ID]" else item }
+            put("query", JSONObject().apply {
+                put("endpointCategory", query.endpoint)
+                put("method", "GET")
+                putNullable("itemTypes", query.filters["IncludeItemTypes"])
+                putNullable("recursive", query.filters["Recursive"]?.toBooleanStrictOrNull())
+                put("parentScope", when {
+                    query.filters.containsKey("ParentId") -> "[ID]"
+                    query.library != null -> "library:${query.library}"
+                    else -> "user-root"
+                })
+                putNullable("sortFields", query.filters["SortBy"])
+                putNullable("sortOrder", query.filters["SortOrder"])
+                put("limit", query.limit)
+                put("requestedFields", JSONArray(fields))
+                put("imageFields", JSONArray(fields.filter { field ->
+                    field.contains("Image", true) || field.contains("Backdrop", true) || field.contains("Logo", true)
+                }))
+                put("filters", JSONObject(safeFilters))
+            })
+        }
+    }
+
+    fun toText(snapshot: PtvDiagnosticsSnapshot): String = toText(
+        PtvExportSnapshot(
+            snapshot,
+            DiscoveryManager.currentPageDiagnostics(DiscoveryPage.HOME),
+            TvRenderingRuntime.capabilitySnapshot()
+        )
+    )
+
+    private fun toText(export: PtvExportSnapshot): String = buildString {
+        val snapshot = export.core
         val device = snapshot.device
         appendLine("PiggieTV Native Diagnostic Report")
         appendLine("================================")
@@ -179,8 +295,34 @@ object PtvDiagnosticExporter {
         appendLine("Mode: ${device.displayMode} @ ${device.refreshRateHz}Hz; insets=${device.insetLeft},${device.insetTop},${device.insetRight},${device.insetBottom}")
         appendLine("Memory: class=${device.memoryClassMb}MB; available=${device.availableMemoryBytes / 1024 / 1024}MB; storage=${device.availableStorageBytes / 1024 / 1024}MB")
         appendLine("Network: ${device.networkTransport}; server=${device.serverReachability}; thermal=${device.thermalStatus ?: "unknown"}")
+        val rendering = export.rendering
+        appendLine(
+            "Rendering: profile=${rendering.renderingProfile}; experiment=${rendering.renderingExperiment}; " +
+                "levels=${rendering.visualFeatureLevels.joinToString("|")}; " +
+                "staticGlass=${rendering.staticGlassEnabled}; shelfGlass=${rendering.shelfGlassEnabled}; " +
+                "iceCard=${rendering.iceCardEnabled}; progressGradient=${rendering.progressGradientEnabled}; " +
+                "enhancedGlass=${rendering.enhancedGlassEnabled}; expensiveEffects=${rendering.expensiveEffectsEnabled}; " +
+                "animatedEffects=${rendering.animatedEffectsEnabled}; focusScale=${rendering.focusScale}; " +
+                "focusElevation=${rendering.focusElevation}; blur=${rendering.blurEnabled}"
+        )
         appendLine()
         appendLine("Trace counts: routes=${snapshot.routes.size}, network=${snapshot.network.size}, images=${snapshot.images.size}, playback=${snapshot.playback.size}, reader=${snapshot.reader.size}, focus=${snapshot.focus.size}")
+        val discoveryAggregate = export.discovery.aggregate
+        appendLine("DISCOVERY HOME: ${DiscoveryDiagnostics.formatManifest(discoveryAggregate)}")
+        export.discovery.shelves.forEach { shelf ->
+            appendLine(
+                "DISCOVERY ${shelf.shelfId} ${shelf.finalState}: ${DiscoveryDiagnostics.formatCounts(shelf)} " +
+                    "total=${shelf.elapsedMs}ms queue=${shelf.queueWaitMs} dns=${shelf.dnsMs} connect=${shelf.connectMs} " +
+                    "tls=${shelf.tlsMs} write=${shelf.requestWriteMs} ttfb=${shelf.timeToFirstByteMs} " +
+                    "read=${shelf.responseReadMs} bytes=${shelf.responseBytes} parse=${shelf.parseMs} " +
+                    "filter=${shelf.filteringMs} score=${shelf.scoringMs} dedupe=${shelf.dedupeMs} " +
+                    "adapterBuild=${shelf.adapterBuildMs} firstSubmit=${shelf.firstCardSubmitMs} firstPoster=${shelf.firstPosterMs} " +
+                    "cacheHit=${shelf.cacheHit} age=${shelf.cacheAgeMs} ttl=${shelf.cacheTtlRemainingMs} " +
+                    "entryBytes=${shelf.cacheEntryBytes} category=${shelf.cacheKeyCategory} source=${shelf.cacheSourceShelfId} " +
+                    "coalesced=${shelf.inFlightCoalesced} refreshBypass=${shelf.cacheRefreshBypassed} " +
+                    "requestAvoided=${shelf.requestAvoided}"
+            )
+        }
         snapshot.routes.takeLast(20).forEach { appendLine("ROUTE ${it.route}: requested=${it.requestedAtMs} visible=${it.visibleAtMs} interactive=${it.interactiveAtMs} focus=${it.focusOwner}") }
         snapshot.network.takeLast(30).forEach { appendLine("NET ${it.method} ${PtvRedactor.endpoint(it.endpoint)} status=${it.status} total=${it.totalMs}ms bytes=${it.responseBytes} error=${PtvRedactor.text(it.exception)}") }
         snapshot.playback.takeLast(30).forEach { appendLine("PLAY ${it.event} item=${PtvRedactor.identifier(it.itemId)} detail=${PtvRedactor.text(it.detail)}") }

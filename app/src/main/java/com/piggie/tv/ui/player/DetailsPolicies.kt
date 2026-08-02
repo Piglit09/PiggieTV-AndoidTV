@@ -216,21 +216,101 @@ data class DetailsContentState(
 
 object MediaDetailsSeedStore {
     private const val LIMIT = 32
-    private val entries = object : LinkedHashMap<String, MediaItem>(LIMIT, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MediaItem>?): Boolean =
-            size > LIMIT
+    private const val MAX_BYTES = 1024L * 1024L
+    private const val TTL_MS = 15L * 60L * 1000L
+
+    data class Stats(val entries: Int, val estimatedBytes: Long)
+
+    private data class Entry(
+        val item: MediaItem,
+        val estimatedBytes: Long,
+        val expiresAtMs: Long
+    )
+
+    private val entries = LinkedHashMap<String, Entry>(LIMIT, 0.75f, true)
+    private var estimatedBytes = 0L
+
+    @Synchronized
+    fun put(item: MediaItem, nowMs: Long = System.currentTimeMillis()) {
+        removeExpired(nowMs)
+        entries.remove(item.id)?.let { estimatedBytes -= it.estimatedBytes }
+        val bytes = estimateBytes(item)
+        entries[item.id] = Entry(item, bytes, nowMs + TTL_MS)
+        estimatedBytes += bytes
+        trimToBounds()
     }
 
     @Synchronized
-    fun put(item: MediaItem) {
-        entries[item.id] = item
+    fun getItem(itemId: String, nowMs: Long = System.currentTimeMillis()): MediaItem? {
+        removeExpired(nowMs)
+        return entries[itemId]?.item
     }
 
     @Synchronized
-    fun getItem(itemId: String): MediaItem? = entries[itemId]
+    fun size(nowMs: Long = System.currentTimeMillis()): Int {
+        removeExpired(nowMs)
+        return entries.size
+    }
 
     @Synchronized
-    fun size(): Int = entries.size
+    fun stats(nowMs: Long = System.currentTimeMillis()): Stats {
+        removeExpired(nowMs)
+        return Stats(entries.size, estimatedBytes)
+    }
+
+    @Synchronized
+    fun trimToPercent(percent: Int) {
+        val targetBytes = MAX_BYTES * percent.coerceIn(0, 100) / 100L
+        val targetEntries = LIMIT * percent.coerceIn(0, 100) / 100
+        while (entries.size > targetEntries || estimatedBytes > targetBytes) removeEldest()
+    }
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+        estimatedBytes = 0L
+    }
+
+    private fun trimToBounds() {
+        while (entries.size > LIMIT || estimatedBytes > MAX_BYTES) removeEldest()
+    }
+
+    private fun removeExpired(nowMs: Long) {
+        val expired = entries.filterValues { it.expiresAtMs <= nowMs }.keys.toList()
+        expired.forEach { key ->
+            entries.remove(key)?.let { estimatedBytes -= it.estimatedBytes }
+        }
+    }
+
+    private fun removeEldest() {
+        val eldest = entries.entries.firstOrNull() ?: return
+        estimatedBytes -= eldest.value.estimatedBytes
+        entries.remove(eldest.key)
+    }
+
+    private fun estimateBytes(item: MediaItem): Long {
+        fun strings(values: Iterable<String?>): Long = values.filterNotNull().sumOf {
+            40L + it.length * 2L
+        }
+        return 512L + strings(
+            listOf(
+                item.id, item.title, item.type, item.year, item.imageTag, item.backdropTag,
+                item.logoTag, item.seriesName, item.episodeLabel, item.overview,
+                item.officialRating, item.container, item.seriesId, item.seasonId, item.album,
+                item.albumArtist, item.albumId, item.artistId, item.director,
+                item.lastPlayedDate, item.dateCreated, item.thumbImageTag,
+                item.parentBackdropItemId, item.parentLogoItemId, item.parentLogoImageTag,
+                item.parentPrimaryImageItemId, item.parentPrimaryImageTag,
+                item.parentThumbItemId, item.parentThumbImageTag, item.seriesPrimaryImageTag
+            )
+        ) + strings(item.genres) + strings(item.studios) + strings(item.artists) +
+            strings(item.backdropImageTags) + strings(item.parentBackdropImageTags) +
+            item.people.sumOf { person ->
+                96L + strings(
+                    listOf(person.id, person.name, person.role, person.type, person.primaryImageTag)
+                )
+            } + item.audioTracks.size * 160L + item.subtitleTracks.size * 160L
+    }
 }
 
 object DetailsNavigationPolicy {

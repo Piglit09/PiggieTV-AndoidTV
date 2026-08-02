@@ -1,9 +1,18 @@
 package com.piggie.tv.ui.rendering
 
+import android.content.res.Resources
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.Rect
-import android.graphics.drawable.GradientDrawable
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.drawable.Drawable
 import android.view.View
 import android.view.ViewGroup
+import androidx.core.graphics.withTranslation
 import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
 import com.piggie.tv.diagnostics.PtvFocusGeometryBounds
@@ -17,6 +26,85 @@ data class FocusOverlayBounds(
     val right: Int,
     val bottom: Int
 )
+
+internal object MediaCardFocusBorderStyle {
+    const val gradientStartColor: Int = -0x63B201
+    const val gradientEndColor: Int = -0xC739
+}
+
+/**
+ * Retains the diagonal shader while the overlay moves between equal-sized cards. Each shelf owns
+ * one overlay, so normal horizontal traversal creates the shader once rather than once per focus.
+ */
+internal class FocusGradientShaderCache {
+    private var width = -1
+    private var height = -1
+    private var shader: Shader? = null
+
+    fun shaderFor(width: Int, height: Int): Shader? {
+        if (width <= 0 || height <= 0) return null
+        if (width != this.width || height != this.height || shader == null) {
+            this.width = width
+            this.height = height
+            shader = LinearGradient(
+                0f,
+                0f,
+                width.toFloat(),
+                height.toFloat(),
+                MediaCardFocusBorderStyle.gradientStartColor,
+                MediaCardFocusBorderStyle.gradientEndColor,
+                Shader.TileMode.CLAMP
+            )
+        }
+        return shader
+    }
+}
+
+/** A transparent, border-only focus ring matching the media artwork's rounded outline. */
+internal class FocusBorderDrawable(resources: Resources) : Drawable() {
+    private val strokeWidth = resources.getDimensionPixelSize(R.dimen.tv_focus_border_width).toFloat()
+    private val cornerRadius = resources.getDimension(R.dimen.tv_media_artwork_corner_radius)
+    private val localBounds = RectF()
+    private val shaderCache = FocusGradientShaderCache()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = this@FocusBorderDrawable.strokeWidth
+    }
+
+    override fun onBoundsChange(bounds: Rect) {
+        super.onBoundsChange(bounds)
+        if (bounds.isEmpty) {
+            localBounds.setEmpty()
+            return
+        }
+        val inset = strokeWidth / 2f
+        localBounds.set(
+            inset,
+            inset,
+            bounds.width().toFloat() - inset,
+            bounds.height().toFloat() - inset
+        )
+        paint.shader = shaderCache.shaderFor(bounds.width(), bounds.height())
+    }
+
+    override fun draw(canvas: Canvas) {
+        if (bounds.isEmpty) return
+        canvas.withTranslation(bounds.left.toFloat(), bounds.top.toFloat()) {
+            drawRoundRect(localBounds, cornerRadius, cornerRadius, paint)
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(colorFilter: ColorFilter?) {
+        paint.colorFilter = colorFilter
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
 
 class FocusOverlayState {
     var focusedKey: Long? = null
@@ -72,84 +160,97 @@ object TvFocusIndicator {
     private class OverlayController(recycler: RecyclerView) {
         private val recyclerRef = WeakReference(recycler)
         private val state = FocusOverlayState()
-        private var focusedView: View? = null
-        private var focusedArtwork: View? = null
-        private var lastBounds = Rect()
-        private val border = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            setColor(android.graphics.Color.TRANSPARENT)
-            setStroke(
-                recycler.resources.getDimensionPixelSize(R.dimen.tv_focus_border_width),
-                recycler.context.getColor(R.color.tv_focus_ring)
-            )
-            cornerRadius = 0f
-        }
+        private var focusedViewRef: WeakReference<View>? = null
+        private var focusedArtworkRef: WeakReference<View>? = null
+        private var focusedViewId: String? = null
+        private val lastBounds = Rect()
+        private val nextBounds = Rect()
+        private val invalidBounds = Rect()
+        private val border = FocusBorderDrawable(recycler.resources)
         private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            focusedView?.let(::updateBounds)
+            focusedViewRef?.get()?.let { updateBounds(it, captureDiagnostics = false) }
         }
 
         init {
             recycler.overlay.add(border)
             recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                    focusedView?.let(::updateBounds)
+                    focusedViewRef?.get()?.let { updateBounds(it, captureDiagnostics = false) }
+                }
+
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                        focusedViewRef?.get()?.let { updateBounds(it, captureDiagnostics = true) }
+                    }
                 }
             })
         }
 
         fun focus(view: View) {
             removeLayoutListeners()
-            focusedView = view
-            focusedArtwork = registeredArtwork(view)
+            val artwork = registeredArtwork(view)
+            focusedViewRef = WeakReference(view)
+            focusedArtworkRef = WeakReference(artwork)
+            focusedViewId = if (PtvDiagnosticsManager.shouldCaptureFocusGeometry()) viewId(view) else null
             view.addOnLayoutChangeListener(layoutListener)
-            if (focusedArtwork !== view) focusedArtwork?.addOnLayoutChangeListener(layoutListener)
-            updateBounds(view)
+            if (artwork !== view) artwork.addOnLayoutChangeListener(layoutListener)
+            updateBounds(view, captureDiagnostics = true)
             diagnose(view)
         }
 
         fun clear(view: View) {
             state.clear(viewKey(view))
-            if (focusedView === view) {
+            if (focusedViewRef?.get() === view) {
                 removeLayoutListeners()
-                focusedView = null
-                focusedArtwork = null
+                focusedViewRef = null
+                focusedArtworkRef = null
+                focusedViewId = null
                 val recycler = recyclerRef.get() ?: return
-                val invalid = Rect(lastBounds)
+                invalidBounds.set(lastBounds)
                 lastBounds.setEmpty()
                 border.bounds = EMPTY_RECT
-                recycler.invalidate(invalid)
+                recycler.invalidate(invalidBounds)
             }
         }
 
-        private fun updateBounds(view: View) {
+        private fun updateBounds(view: View, captureDiagnostics: Boolean) {
             val recycler = recyclerRef.get() ?: return
             val artwork = registeredArtwork(view)
             if (!artwork.isAttachedToWindow || artwork.width <= 0 || artwork.height <= 0) return
-            val bounds = Rect(0, 0, artwork.width, artwork.height)
-            recycler.offsetDescendantRectToMyCoords(artwork, bounds)
-            state.focus(
-                viewKey(view),
-                FocusOverlayBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
-            )
-            val invalid = Rect(lastBounds)
-            invalid.union(bounds)
-            lastBounds = Rect(bounds)
-            border.bounds = bounds
-            recycler.invalidate(invalid)
-            if (PtvDiagnosticsManager.isEnabled()) {
-                val card = Rect(0, 0, view.width, view.height)
-                recycler.offsetDescendantRectToMyCoords(view, card)
-                PtvDiagnosticsManager.updateFocusGeometry(
-                    focusedViewId = viewId(view),
-                    cardBounds = card.asGeometryBounds(),
-                    artworkBounds = bounds.asGeometryBounds(),
-                    indicatorBounds = border.bounds.asGeometryBounds()
+            nextBounds.set(0, 0, artwork.width, artwork.height)
+            recycler.offsetDescendantRectToMyCoords(artwork, nextBounds)
+            val key = viewKey(view)
+            if (state.focusedKey != key) {
+                state.focus(
+                    key,
+                    FocusOverlayBounds(nextBounds.left, nextBounds.top, nextBounds.right, nextBounds.bottom)
                 )
+            }
+            if (lastBounds != nextBounds) {
+                invalidBounds.set(lastBounds)
+                invalidBounds.union(nextBounds)
+                lastBounds.set(nextBounds)
+                border.setBounds(nextBounds.left, nextBounds.top, nextBounds.right, nextBounds.bottom)
+                recycler.invalidate(invalidBounds)
+            }
+            if (captureDiagnostics && PtvDiagnosticsManager.shouldCaptureFocusGeometry()) {
+                captureGeometry(recycler, view, nextBounds)
             }
         }
 
+        private fun captureGeometry(recycler: RecyclerView, view: View, artworkBounds: Rect) {
+            val card = Rect(0, 0, view.width, view.height)
+            recycler.offsetDescendantRectToMyCoords(view, card)
+            PtvDiagnosticsManager.updateFocusGeometry(
+                focusedViewId = focusedViewId ?: viewId(view).also { focusedViewId = it },
+                cardBounds = card.asGeometryBounds(),
+                artworkBounds = artworkBounds.asGeometryBounds(),
+                indicatorBounds = artworkBounds.asGeometryBounds()
+            )
+        }
+
         private fun diagnose(view: View) {
-            if (!PtvDiagnosticsManager.isEnabled()) return
+            if (!PtvDiagnosticsManager.shouldCollectShelfTrace()) return
             val recycler = recyclerRef.get() ?: return
             val card = Rect(0, 0, view.width, view.height)
             recycler.offsetDescendantRectToMyCoords(view, card)
@@ -169,8 +270,10 @@ object TvFocusIndicator {
         }
 
         private fun removeLayoutListeners() {
+            val focusedView = focusedViewRef?.get()
             focusedView?.removeOnLayoutChangeListener(layoutListener)
-            focusedArtwork?.takeIf { it !== focusedView }
+            focusedArtworkRef?.get()
+                ?.takeIf { it !== focusedView }
                 ?.removeOnLayoutChangeListener(layoutListener)
         }
     }

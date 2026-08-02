@@ -565,6 +565,16 @@ class ReaderActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        viewModel.onTrimMemory(level)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        viewModel.onTrimMemory(com.piggie.tv.memory.MemoryPressurePolicy.COMPLETE)
+    }
+
     companion object {
         private const val EXTRA_ITEM_ID = "extra_item_id"
         private const val EXTRA_ITEM_JSON = "extra_item_json"

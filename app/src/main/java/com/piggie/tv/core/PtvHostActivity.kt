@@ -38,6 +38,8 @@ import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.diagnostics.PerformanceMonitor
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvFocusTrace
+import com.piggie.tv.memory.MemoryPressurePolicy
+import com.piggie.tv.memory.MemoryPressureParticipant
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.lang.ref.WeakReference
@@ -109,6 +111,40 @@ class PtvHostActivity : AppCompatActivity() {
         outState.putString("current_route", currentRoute.name)
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val memoryTarget = detailsFragment?.takeIf { it.view != null }
+            ?: visibleFragment?.takeIf { it.view != null }
+        (memoryTarget as? MemoryPressureParticipant)
+            ?.onMemoryPressure(level)
+        if (MemoryPressurePolicy.actions(level).releaseInactiveRoutes) {
+            releaseInactiveRouteFragments()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        releaseInactiveRouteFragments()
+    }
+
+    private fun releaseInactiveRouteFragments() {
+        val inactive = routeFragments.entries
+            .filter { (route, fragment) -> route != currentRoute && fragment !== visibleFragment }
+        if (inactive.isEmpty()) return
+
+        inactive.forEach { (route, _) -> routeFragments.remove(route) }
+        if (isFinishing || isDestroyed) return
+        // Keep removals in the FragmentManager queue. A synchronous commit here can leapfrog an
+        // already queued route transaction which still caps the outgoing Fragment's lifecycle,
+        // leaving that transaction to call setMaxLifecycle() on a Fragment we just made inactive.
+        // Removing pending additions as well as isAdded Fragments also prevents an orphaned route
+        // when a trim arrives between commit() and execution of the cold-start transaction.
+        supportFragmentManager.beginTransaction()
+            .setReorderingAllowed(true)
+            .apply { inactive.forEach { (_, fragment) -> remove(fragment) } }
+            .commitAllowingStateLoss()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
             KeyEvent.KEYCODE_ESCAPE,
@@ -169,19 +205,30 @@ class PtvHostActivity : AppCompatActivity() {
         PtvDiagnosticsManager.routeRequested(route)
         navigation.forEach { (navRoute, button) -> button.isSelected = navRoute == target }
 
-        val fragment = routeFragments[target]
-            ?: supportFragmentManager.findFragmentByTag(routeTag(target))
-            ?: createRouteFragment(target)
+        // restoreCachedFragments() makes the route cache authoritative after state restoration.
+        // A tag lookup here can rediscover an active Fragment whose removal is already queued by
+        // cache eviction or memory pressure. Reusing it would enqueue show/setMaxLifecycle after
+        // remove and crash when the batched transactions execute.
+        val fragment = routeFragments[target] ?: createRouteFragment(target)
         routeFragments[target] = fragment
 
         val transaction = supportFragmentManager.beginTransaction().setReorderingAllowed(true)
-        detailsFragment?.takeIf { it.isAdded }?.let(transaction::remove)
+        // A Details add may still be queued when a route is selected. Queue its removal behind
+        // that add so the pending Fragment cannot become an orphaned resumed destination.
+        detailsFragment?.let(transaction::remove)
         detailsFragment = null
         endDetailsTrace()
-        visibleFragment?.takeIf { it !== fragment && it.isAdded }?.let {
+        val outgoingFragment = visibleFragment
+        val outgoingIsRegistered = routeFragments.values.any { it === outgoingFragment }
+        outgoingFragment
+            ?.takeIf { it !== fragment && (it.isAdded || outgoingIsRegistered) }
+            ?.let {
             if (it.tag?.startsWith(ROUTE_TAG_PREFIX) == true && !isRegisteredRouteFragment(it)) {
                 transaction.remove(it)
             } else {
+                // A rapid route change can arrive before the previous add executes. Both
+                // transactions use this FragmentManager, so FIFO execution makes this hide and
+                // lifecycle cap valid for that registered pending route as well.
                 transaction.hide(it).setMaxLifecycle(it, Lifecycle.State.STARTED)
             }
         }
@@ -194,9 +241,18 @@ class PtvHostActivity : AppCompatActivity() {
         transaction.setPrimaryNavigationFragment(fragment)
 
         while (routeFragments.size > ROUTE_CACHE_SIZE) {
-            val routeToEvict = routeFragments.keys.firstOrNull { it != target } ?: break
+            val outgoingRoute = routeFragments.entries
+                .firstOrNull { (_, cachedFragment) -> cachedFragment === outgoingFragment }
+                ?.key
+            val routeToEvict = NativeRouteNavigator.evictionCandidate(
+                lruRoutes = routeFragments.keys,
+                target = target,
+                outgoing = outgoingRoute
+            ) ?: break
             val fragmentToEvict = routeFragments.remove(routeToEvict)
-            if (fragmentToEvict != null && fragmentToEvict.isAdded && fragmentToEvict !== fragment) {
+            if (fragmentToEvict != null && fragmentToEvict !== fragment) {
+                // Queue removal even if add() has not executed yet; both operations belong to this
+                // FragmentManager and FIFO execution then prevents an untracked active Fragment.
                 transaction.remove(fragmentToEvict)
             }
         }
@@ -321,8 +377,9 @@ class PtvHostActivity : AppCompatActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val trackedKey = event.action == KeyEvent.ACTION_DOWN && event.keyCode in TRACKED_DPAD_KEYS
-        val diagnostics = trackedKey && PtvDiagnosticsManager.isEnabled()
-        val traceEnabled = trackedKey && isSystemTraceEnabled()
+        if (trackedKey) PtvDiagnosticsManager.markUiInteraction()
+        val diagnostics = trackedKey && PtvDiagnosticsManager.shouldTraceInput()
+        val traceEnabled = diagnostics && isSystemTraceEnabled()
         val tracked = diagnostics || traceEnabled
         val previous = if (diagnostics) describeFocus(currentFocus) else null
         val traceName = if (tracked) "PiggieTV#input:${KeyEvent.keyCodeToString(event.keyCode)}" else ""

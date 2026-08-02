@@ -85,6 +85,7 @@ class TvShelfScrollCoordinator(
     }
 
     private fun record(position: Int, requestedOffset: Int, focused: View) {
+        if (!PtvDiagnosticsManager.shouldCollectShelfTrace()) return
         page.post {
             val bounds = TvFocusIndicator.artworkBoundsOnScreen(focused)
             PtvDiagnosticsManager.event(

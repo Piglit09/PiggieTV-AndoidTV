@@ -43,6 +43,16 @@ enum class DetailsBackdropMode {
 }
 
 /**
+ * Independently selectable visual capability tiers. SAFE_STATIC_GLASS never
+ * implies animation, blur, elevation, or another per-frame effect.
+ */
+enum class VisualFeatureLevel {
+    SAFE_STATIC_GLASS,
+    ENHANCED_GLASS,
+    EXPENSIVE_EFFECTS
+}
+
+/**
  * Debug-only experiment names used by the physical A-I matrix. AUTO is the
  * production policy selected from the device profile.
  */
@@ -67,7 +77,9 @@ enum class RenderingExperiment(val wireName: String) {
     SPAN_6("span_6"),
     PREFETCH_ENABLED("prefetch_enabled"),
     PREFETCH_REDUCED("prefetch_reduced"),
-    PREFETCH_DISABLED("prefetch_disabled");
+    PREFETCH_DISABLED("prefetch_disabled"),
+    FLAT_FIRE_FALLBACK("flat_fire_fallback"),
+    SAFE_STATIC_GLASS("safe_static_glass");
 
     companion object {
         fun fromWireName(value: String?): RenderingExperiment =
@@ -91,7 +103,39 @@ data class RendererFeatures(
     val rgb565Posters: Boolean,
     val detailsArchitecture: DetailsArchitecture,
     val progressiveDetails: Boolean,
-    val detailsBackdrop: DetailsBackdropMode
+    val detailsBackdrop: DetailsBackdropMode,
+    val staticGlassEnabled: Boolean,
+    val shelfGlassEnabled: Boolean,
+    val iceCardEnabled: Boolean,
+    val progressGradientEnabled: Boolean,
+    val enhancedGlassEnabled: Boolean,
+    val expensiveEffectsEnabled: Boolean,
+    val animatedEffectsEnabled: Boolean,
+    val focusScale: Float,
+    val focusElevation: Float,
+    val blurEnabled: Boolean
+) {
+    fun visualFeatureLevels(): Set<VisualFeatureLevel> = buildSet {
+        if (staticGlassEnabled) add(VisualFeatureLevel.SAFE_STATIC_GLASS)
+        if (enhancedGlassEnabled) add(VisualFeatureLevel.ENHANCED_GLASS)
+        if (expensiveEffectsEnabled) add(VisualFeatureLevel.EXPENSIVE_EFFECTS)
+    }
+}
+
+data class RenderingCapabilitySnapshot(
+    val renderingProfile: String,
+    val renderingExperiment: String,
+    val visualFeatureLevels: List<String>,
+    val staticGlassEnabled: Boolean,
+    val shelfGlassEnabled: Boolean,
+    val iceCardEnabled: Boolean,
+    val progressGradientEnabled: Boolean,
+    val enhancedGlassEnabled: Boolean,
+    val expensiveEffectsEnabled: Boolean,
+    val animatedEffectsEnabled: Boolean,
+    val focusScale: Float,
+    val focusElevation: Float,
+    val blurEnabled: Boolean
 )
 
 object TvRenderingProfileResolver {
@@ -123,11 +167,22 @@ object RendererFeaturePolicy {
         rgb565Posters = false,
         detailsArchitecture = DetailsArchitecture.ACTIVITY,
         progressiveDetails = false,
-        detailsBackdrop = DetailsBackdropMode.IMMEDIATE
+        detailsBackdrop = DetailsBackdropMode.IMMEDIATE,
+        staticGlassEnabled = true,
+        shelfGlassEnabled = true,
+        iceCardEnabled = true,
+        progressGradientEnabled = true,
+        enhancedGlassEnabled = true,
+        expensiveEffectsEnabled = true,
+        animatedEffectsEnabled = true,
+        focusScale = 1f,
+        focusElevation = 0f,
+        blurEnabled = false
     )
 
     val fireTvPerformance = rich.copy(
         flatRectangularCards = true,
+        cardClipping = true,
         gradients = false,
         alphaOverlays = false,
         dynamicBrowsingBackdrops = false,
@@ -139,7 +194,25 @@ object RendererFeaturePolicy {
         rgb565Posters = true,
         detailsArchitecture = DetailsArchitecture.IN_HOST_FRAGMENT,
         progressiveDetails = true,
-        detailsBackdrop = DetailsBackdropMode.DELAYED
+        detailsBackdrop = DetailsBackdropMode.DELAYED,
+        staticGlassEnabled = true,
+        shelfGlassEnabled = true,
+        iceCardEnabled = true,
+        progressGradientEnabled = true,
+        enhancedGlassEnabled = false,
+        expensiveEffectsEnabled = false,
+        animatedEffectsEnabled = false,
+        focusScale = 1f,
+        focusElevation = 0f,
+        blurEnabled = false
+    )
+
+    /** Previous accepted AFTKM presentation retained for same-APK A/B runs. */
+    val fireTvFlatFallback = fireTvPerformance.copy(
+        staticGlassEnabled = false,
+        shelfGlassEnabled = false,
+        iceCardEnabled = false,
+        progressGradientEnabled = false
     )
 
     fun forProfile(profile: TvRenderingProfile): RendererFeatures = when (profile) {
@@ -169,17 +242,21 @@ object RendererFeaturePolicy {
             RenderingExperiment.E_OPAQUE_BACKGROUNDS -> current.copy(
                 gradients = false,
                 alphaOverlays = false,
-                opaqueRoots = true
+                opaqueRoots = true,
+                staticGlassEnabled = false,
+                shelfGlassEnabled = false,
+                iceCardEnabled = false,
+                progressGradientEnabled = false
             )
             RenderingExperiment.F_SIX_VISIBLE_POSTERS -> current.copy(posterSpanCount = 6)
-            RenderingExperiment.G_COMBINED_LOW_COST -> fireTvPerformance
-            RenderingExperiment.G_COMBINED_PREFETCH_ENABLED -> fireTvPerformance.copy(
+            RenderingExperiment.G_COMBINED_LOW_COST -> fireTvFlatFallback
+            RenderingExperiment.G_COMBINED_PREFETCH_ENABLED -> fireTvFlatFallback.copy(
                 prefetchMode = RecyclerPrefetchMode.ENABLED
             )
-            RenderingExperiment.G_COMBINED_PREFETCH_DISABLED -> fireTvPerformance.copy(
+            RenderingExperiment.G_COMBINED_PREFETCH_DISABLED -> fireTvFlatFallback.copy(
                 prefetchMode = RecyclerPrefetchMode.DISABLED
             )
-            RenderingExperiment.G_COMBINED_SIX_POSTERS -> fireTvPerformance.copy(
+            RenderingExperiment.G_COMBINED_SIX_POSTERS -> fireTvFlatFallback.copy(
                 posterSpanCount = 6
             )
             RenderingExperiment.H_IN_HOST_DETAILS -> current.copy(
@@ -199,7 +276,31 @@ object RendererFeaturePolicy {
             RenderingExperiment.PREFETCH_ENABLED -> current.copy(prefetchMode = RecyclerPrefetchMode.ENABLED)
             RenderingExperiment.PREFETCH_REDUCED -> current.copy(prefetchMode = RecyclerPrefetchMode.REDUCED)
             RenderingExperiment.PREFETCH_DISABLED -> current.copy(prefetchMode = RecyclerPrefetchMode.DISABLED)
+            RenderingExperiment.FLAT_FIRE_FALLBACK -> fireTvFlatFallback
+            RenderingExperiment.SAFE_STATIC_GLASS -> fireTvPerformance
         }
+    }
+
+    fun capabilitySnapshot(
+        profile: TvRenderingProfile,
+        experiment: RenderingExperiment
+    ): RenderingCapabilitySnapshot {
+        val features = forExperiment(profile, experiment)
+        return RenderingCapabilitySnapshot(
+            renderingProfile = profile.name,
+            renderingExperiment = experiment.wireName,
+            visualFeatureLevels = features.visualFeatureLevels().map { it.name },
+            staticGlassEnabled = features.staticGlassEnabled,
+            shelfGlassEnabled = features.shelfGlassEnabled,
+            iceCardEnabled = features.iceCardEnabled,
+            progressGradientEnabled = features.progressGradientEnabled,
+            enhancedGlassEnabled = features.enhancedGlassEnabled,
+            expensiveEffectsEnabled = features.expensiveEffectsEnabled,
+            animatedEffectsEnabled = features.animatedEffectsEnabled,
+            focusScale = features.focusScale,
+            focusElevation = features.focusElevation,
+            blurEnabled = features.blurEnabled
+        )
     }
 }
 
@@ -209,25 +310,62 @@ object TvRenderingRuntime {
     @Volatile
     private var debugExperiment = RenderingExperiment.AUTO
 
+    private data class CachedResolution(
+        val manufacturer: String,
+        val model: String,
+        val experiment: RenderingExperiment,
+        val profile: TvRenderingProfile,
+        val features: RendererFeatures
+    )
+
+    @Volatile
+    private var cachedResolution: CachedResolution? = null
+
     fun configureDebugExperiment(value: String?) {
         debugExperiment = if (BuildConfig.DEBUG) {
             RenderingExperiment.fromWireName(value)
         } else {
             RenderingExperiment.AUTO
         }
+        cachedResolution = null
     }
 
-    fun profile(): TvRenderingProfile = TvRenderingProfileResolver.resolve(
-        TvRenderingDevice(Build.MANUFACTURER, Build.MODEL)
-    )
+    fun profile(): TvRenderingProfile = resolution().profile
 
-    fun features(): RendererFeatures =
-        RendererFeaturePolicy.forExperiment(profile(), debugExperiment)
+    fun features(): RendererFeatures = resolution().features
 
     fun experiment(): RenderingExperiment = debugExperiment
 
+    fun capabilitySnapshot(): RenderingCapabilitySnapshot =
+        RendererFeaturePolicy.capabilitySnapshot(profile(), debugExperiment)
+
     fun initialize(@Suppress("UNUSED_PARAMETER") context: Context) {
         // Forces no I/O. Kept as an explicit application initialization seam.
-        profile()
+        resolution()
+    }
+
+    private fun resolution(): CachedResolution {
+        val manufacturer = Build.MANUFACTURER.orEmpty()
+        val model = Build.MODEL.orEmpty()
+        val experiment = debugExperiment
+        cachedResolution?.takeIf {
+            it.manufacturer == manufacturer && it.model == model && it.experiment == experiment
+        }?.let { return it }
+
+        return synchronized(this) {
+            cachedResolution?.takeIf {
+                it.manufacturer == manufacturer && it.model == model && it.experiment == experiment
+            } ?: TvRenderingProfileResolver.resolve(
+                TvRenderingDevice(manufacturer, model)
+            ).let { profile ->
+                CachedResolution(
+                    manufacturer = manufacturer,
+                    model = model,
+                    experiment = experiment,
+                    profile = profile,
+                    features = RendererFeaturePolicy.forExperiment(profile, experiment)
+                ).also { cachedResolution = it }
+            }
+        }
     }
 }

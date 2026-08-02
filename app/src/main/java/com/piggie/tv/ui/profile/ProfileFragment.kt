@@ -16,7 +16,10 @@ import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.navigation.NativeRoute
+import com.piggie.tv.ui.player.MediaDetailsSeedStore
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import com.piggie.tv.util.sp
@@ -44,9 +47,16 @@ class ProfileFragment : Fragment() {
             setBackgroundResource(R.drawable.tv_nav_button)
             setPadding(context.dim(R.dimen.tv_card_padding), context.dim(R.dimen.tv_card_padding), context.dim(R.dimen.tv_card_padding), context.dim(R.dimen.tv_card_padding))
             val url = session.serverUrl + "/Users/" + session.userId + "/Images/Primary"
+            val avatarSize = context.dim(R.dimen.tv_square_width) / 2
             load(url) {
                 placeholder(android.R.drawable.ic_menu_gallery)
                 error(android.R.drawable.ic_menu_gallery)
+                size(avatarSize, avatarSize)
+                setParameter(
+                    PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                    PtvCoilEventListenerFactory.CATEGORY_PROFILE,
+                    null
+                )
             }
         }
         userBox.addView(avatar, LinearLayout.LayoutParams(context.dim(R.dimen.tv_square_width) / 2, context.dim(R.dimen.tv_square_height) / 2))
@@ -75,6 +85,8 @@ class ProfileFragment : Fragment() {
             setTextColor(context.getColor(R.color.tv_text_primary))
             setOnClickListener { 
                 store.clear()
+                DiscoveryManager.clearForLogout()
+                MediaDetailsSeedStore.clear()
                 activity?.finish()
             }
         }, LinearLayout.LayoutParams(context.dim(R.dimen.tv_hero_button_width), context.dim(R.dimen.tv_nav_button_height) + context.dim(R.dimen.tv_spacing_small)).apply { topMargin = context.dim(R.dimen.tv_spacing_small) })

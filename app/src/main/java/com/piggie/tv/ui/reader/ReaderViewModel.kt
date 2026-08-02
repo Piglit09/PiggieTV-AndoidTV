@@ -17,6 +17,7 @@ import com.piggie.tv.data.session.ReadingSettings
 import com.piggie.tv.util.PTVLog
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvReaderTrace
+import com.piggie.tv.memory.MemoryPressurePolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,8 +59,13 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private val settings = ReadingSettings(application)
     private val sourceMutex = Mutex()
     private val requestCounter = AtomicInteger()
-    private val bitmapCache = object : LruCache<String, Bitmap>(48 * 1024 * 1024) {
+    private val bitmapCacheTimes = mutableMapOf<String, Long>()
+    private val bitmapCache = object : LruCache<String, Bitmap>(READER_BITMAP_CACHE_BYTES) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+
+        override fun entryRemoved(evicted: Boolean, key: String, oldValue: Bitmap, newValue: Bitmap?) {
+            if (newValue == null) bitmapCacheTimes.remove(key)
+        }
     }
 
     private val _state = MutableStateFlow<ReaderState>(ReaderState.Idle)
@@ -120,7 +126,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         prefetchJob?.cancel()
         currentPageJob = viewModelScope.launch {
             val key = cacheKey(index, targetWidth, targetHeight)
-            val cached = synchronized(bitmapCache) { bitmapCache.get(key) }
+            val cached = getCachedBitmap(key)
             val startedAt = android.os.SystemClock.elapsedRealtime()
             val bitmap = try {
                 cached ?: withContext(Dispatchers.IO) {
@@ -128,7 +134,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                         currentSource?.getPage(index, targetWidth, targetHeight)
                     }
                 }?.also {
-                    synchronized(bitmapCache) { bitmapCache.put(key, it) }
+                    putCachedBitmap(key, it)
                     PtvDiagnosticsManager.setPageCacheEntries(synchronized(bitmapCache) { bitmapCache.snapshot().size })
                 }
             } catch (_: CancellationException) {
@@ -173,10 +179,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 .forEach { index ->
                     ensureActive()
                     val key = cacheKey(index, width, height)
-                    if (synchronized(bitmapCache) { bitmapCache.get(key) } == null) {
+                    if (getCachedBitmap(key) == null) {
                         val bitmap = sourceMutex.withLock { currentSource?.getPage(index, width, height) }
                         if (bitmap != null) {
-                            synchronized(bitmapCache) { bitmapCache.put(key, bitmap) }
+                            putCachedBitmap(key, bitmap)
                             PtvDiagnosticsManager.setPageCacheEntries(synchronized(bitmapCache) { bitmapCache.snapshot().size })
                         }
                     }
@@ -197,13 +203,54 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         settings.setFitMode(session, itemId, fitMode.name)
     }
 
+    fun onTrimMemory(level: Int) {
+        val actions = MemoryPressurePolicy.actions(level)
+        if (!actions.clearImageMemoryCache) return
+        prefetchJob?.cancel()
+        synchronized(bitmapCache) {
+            bitmapCache.trimToSize(
+                if (actions.discoveryCachePercent > 0) READER_BITMAP_LOW_BYTES else 0
+            )
+            PtvDiagnosticsManager.setPageCacheEntries(bitmapCache.snapshot().size)
+        }
+    }
+
+    private fun getCachedBitmap(key: String, nowMs: Long = android.os.SystemClock.elapsedRealtime()): Bitmap? =
+        synchronized(bitmapCache) {
+            val storedAt = bitmapCacheTimes[key]
+            if (storedAt == null || nowMs - storedAt > READER_BITMAP_TTL_MS) {
+                bitmapCache.remove(key)
+                null
+            } else {
+                bitmapCache.get(key)
+            }
+        }
+
+    private fun putCachedBitmap(
+        key: String,
+        bitmap: Bitmap,
+        nowMs: Long = android.os.SystemClock.elapsedRealtime()
+    ) = synchronized(bitmapCache) {
+        bitmapCacheTimes[key] = nowMs
+        bitmapCache.put(key, bitmap)
+    }
+
     private fun cacheKey(index: Int, width: Int, height: Int): String = "$currentItemId:$index@${width}x$height"
 
     override fun onCleared() {
         currentPageJob?.cancel()
         prefetchJob?.cancel()
         currentSource?.release()
-        bitmapCache.evictAll()
+        synchronized(bitmapCache) {
+            bitmapCache.evictAll()
+            bitmapCacheTimes.clear()
+        }
         super.onCleared()
+    }
+
+    private companion object {
+        const val READER_BITMAP_CACHE_BYTES = 24 * 1024 * 1024
+        const val READER_BITMAP_LOW_BYTES = 8 * 1024 * 1024
+        const val READER_BITMAP_TTL_MS = 5L * 60L * 1000L
     }
 }

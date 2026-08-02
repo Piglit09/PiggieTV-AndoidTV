@@ -52,7 +52,9 @@ data class MediaItem(
     val parentThumbImageTag: String? = null,
     val seriesPrimaryImageTag: String? = null,
     val audioTracks: List<AudioTrack> = emptyList(),
-    val subtitleTracks: List<SubtitleTrack> = emptyList()
+    val subtitleTracks: List<SubtitleTrack> = emptyList(),
+    /** Jellyfin source whose stream indices populate [audioTracks] and [subtitleTracks]. */
+    val mediaSourceId: String? = null
 )
 
 data class Person(
@@ -79,7 +81,10 @@ data class SubtitleTrack(
     val isDefault: Boolean,
     val type: String?,
     val isForced: Boolean = false,
-    val codec: String? = null
+    val codec: String? = null,
+    val isExternal: Boolean = false,
+    val supportsExternalStream: Boolean = false,
+    val deliveryUrl: String? = null
 )
 
 data class MediaShelf(

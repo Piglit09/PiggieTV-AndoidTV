@@ -29,20 +29,22 @@ class MainActivity : AppCompatActivity() {
             intent.getStringExtra(TvRenderingRuntime.DEBUG_EXPERIMENT_EXTRA)
         )
         if (com.piggie.tv.BuildConfig.DEBUG) {
-            when (DiagnosticsExperiment.fromWireName(intent.getStringExtra(DiagnosticsExperiment.DEBUG_EXTRA))) {
-                DiagnosticsExperiment.AUTO -> Unit
-                DiagnosticsExperiment.DISABLED -> {
-                    PtvDiagnosticsManager.setEnabled(this, false)
-                    NativeSettings(this).diagnosticsOverlayEnabled = false
-                }
-                DiagnosticsExperiment.ENABLED_NO_OVERLAY -> {
-                    PtvDiagnosticsManager.setEnabled(this, true)
-                    NativeSettings(this).diagnosticsOverlayEnabled = false
-                }
-                DiagnosticsExperiment.FULL -> {
-                    PtvDiagnosticsManager.setEnabled(this, true)
-                    NativeSettings(this).diagnosticsOverlayEnabled = true
-                }
+            val faultCategory = intent.getStringExtra("ptv_fault_category")?.let { value ->
+                com.piggie.tv.data.api.DiscoveryEndpointCategory.entries.firstOrNull { it.name.equals(value, true) }
+            }
+            com.piggie.tv.data.api.DebugDiscoveryFaultInjector.configure(
+                faultCategory,
+                com.piggie.tv.data.api.DiscoveryFaultMode.fromWireName(intent.getStringExtra("ptv_fault_mode")),
+                intent.getStringExtra("ptv_fault_shelf"),
+                intent.getBooleanExtra("ptv_discovery_refresh", false)
+            )
+            val diagnosticsExperiment = DiagnosticsExperiment.fromWireName(
+                intent.getStringExtra(DiagnosticsExperiment.DEBUG_EXTRA)
+            )
+            diagnosticsExperiment.collectionMode?.let { mode ->
+                PtvDiagnosticsManager.setCollectionMode(this, mode)
+                NativeSettings(this).diagnosticsOverlayEnabled =
+                    diagnosticsExperiment.overlayVisible == true
             }
         }
 

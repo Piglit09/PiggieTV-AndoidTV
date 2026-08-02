@@ -9,6 +9,8 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.piggie.tv.R
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.ui.player.MediaDetailsSeedStore
 
 class ConnectionRecoveryActivity : AppCompatActivity() {
     private val store by lazy { SecureSessionStore(this) }
@@ -54,6 +56,8 @@ class ConnectionRecoveryActivity : AppCompatActivity() {
             text = "Sign Out"
             setOnClickListener {
                 store.clear()
+                DiscoveryManager.clearForLogout()
+                MediaDetailsSeedStore.clear()
                 startActivity(Intent(this@ConnectionRecoveryActivity, MainActivity::class.java))
                 finishAffinity()
             }

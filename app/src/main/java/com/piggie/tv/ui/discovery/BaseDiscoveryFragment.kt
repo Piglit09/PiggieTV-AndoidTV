@@ -10,7 +10,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
-import coil.dispose
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
@@ -24,6 +23,8 @@ import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.memory.MemoryPressureParticipant
+import com.piggie.tv.memory.MemoryPressurePolicy
 import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.theme.PTVShapes
 import com.piggie.tv.ui.hero.HeroCandidate
@@ -32,6 +33,7 @@ import com.piggie.tv.ui.hero.HeroInitialVisibilitySampler
 import com.piggie.tv.ui.hero.HeroRoute
 import com.piggie.tv.ui.hero.HeroRefreshableRoute
 import com.piggie.tv.ui.hero.HeroRowView
+import com.piggie.tv.ui.hero.HeroRowLayoutContract
 import com.piggie.tv.ui.hero.HeroSource
 import com.piggie.tv.ui.hero.HeroState
 import com.piggie.tv.ui.hero.HeroVisibilityPolicy
@@ -48,7 +50,7 @@ import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import kotlin.concurrent.thread
 
-abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
+abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryPressureParticipant {
     protected abstract val discoveryPage: DiscoveryPage
     protected abstract val heroRoute: HeroRoute
 
@@ -68,6 +70,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
     private var shelfCoordinator: TvShelfScrollCoordinator? = null
     private var initialHeroVisibilitySampler: HeroInitialVisibilitySampler? = null
     private var pageLoadStartedAt = 0L
+    private var routeVisible = false
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -111,7 +114,12 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
             clipToPadding = false
             isFocusable = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(0, 0, 0, requireContext().dim(R.dimen.tv_spacing_large))
+            setPadding(
+                requireContext().dim(R.dimen.tv_shelf_margin_horizontal),
+                0,
+                requireContext().dim(R.dimen.tv_shelf_margin_horizontal),
+                requireContext().dim(R.dimen.tv_spacing_large)
+            )
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     updateHeroVisibility()
@@ -124,6 +132,9 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // A restored hidden Fragment can create its view while capped at STARTED. Build the
+        // retained slots now, but do not start network work until the route truly resumes.
+        routeVisible = false
         viewLifecycleOwner.lifecycle.addObserver(heroController)
         loadData()
         initialHeroVisibilitySampler = HeroInitialVisibilitySampler(
@@ -134,6 +145,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
 
     override fun onDestroyView() {
         destroyed = true
+        routeVisible = false
         discoveryRequest?.cancel()
         discoveryRequest = null
         initialHeroVisibilitySampler?.detach()
@@ -141,15 +153,52 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
         shelfCoordinator?.detach()
         shelfCoordinator = null
         heroController.release()
+        heroState = null
         if (::page.isInitialized) page.adapter = null
         super.onDestroyView()
+    }
+
+    override fun onPause() {
+        routeVisible = false
+        discoveryRequest?.cancel()
+        discoveryRequest = null
+        cancelSupplementalHeroCandidates()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        routeVisible = true
+        if (::pageAdapter.isInitialized && discoveryRequest == null && !destroyed) {
+            startDiscoveryRequest()
+            loadSupplementalHeroCandidates()
+        }
     }
 
     override fun refreshHero() {
         heroController.refresh()
     }
 
+    override fun onMemoryPressure(level: Int) {
+        val actions = MemoryPressurePolicy.actions(level)
+        if (actions.discoveryCachePercent > 0) return
+        if (!actions.releaseCurrentScreenContent) {
+            // Supplemental hero fetches are optional, but the visible shelves and current hero
+            // must remain usable because RUNNING_CRITICAL does not trigger a later onResume().
+            cancelSupplementalHeroCandidates()
+            return
+        }
+        discoveryRequest?.cancel()
+        discoveryRequest = null
+        cancelSupplementalHeroCandidates()
+        if (::heroController.isInitialized) heroController.release()
+        heroState = null
+        if (::heroRow.isInitialized) heroRow.releaseForMemoryPressure()
+    }
+
     protected open fun loadSupplementalHeroCandidates() = Unit
+
+    protected open fun cancelSupplementalHeroCandidates() = Unit
 
     protected fun offerHeroCandidates(
         key: String,
@@ -167,15 +216,9 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
             createShelfContent = ::createShelfView,
             onRetry = { shelfId -> discoveryRequest?.retryShelf(shelfId) },
             bindHeader = { container ->
-                (heroRow.parent as? ViewGroup)?.removeView(heroRow)
-                container.minimumHeight = requireContext().dim(R.dimen.tv_hero_height)
-                container.addView(
-                    heroRow,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        requireContext().dim(R.dimen.tv_hero_height)
-                    )
-                )
+                val heroHeight = requireContext().dim(R.dimen.tv_hero_height)
+                HeroRowLayoutContract.bind(container, heroRow, heroHeight)
+                container.post { heroRow.traceMeasurement(container) }
             }
         )
         page.adapter = pageAdapter
@@ -184,6 +227,10 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
             pageAdapter,
             discoveryPage.name.lowercase()
         ).also { it.attach() }
+    }
+
+    private fun startDiscoveryRequest() {
+        val manifest = DiscoveryManager.manifest(discoveryPage)
         discoveryRequest = DiscoveryManager.loadPage(
             api = api,
             nativeSession = session,
@@ -191,8 +238,16 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
             discoverySession = DiscoveryManager.getSession(api, session)
         ) { shelf ->
             activity?.runOnUiThread {
-                if (destroyed) return@runOnUiThread
+                if (destroyed || !routeVisible) return@runOnUiThread
+                if (shelf.diagnostic.generationId != DiscoveryManager.currentGenerationId(discoveryPage)) {
+                    return@runOnUiThread
+                }
+                val adapterStarted = android.os.SystemClock.elapsedRealtime()
                 pageAdapter.updateShelf(shelf)
+                DiscoveryManager.recordAdapterState(
+                    shelf,
+                    android.os.SystemClock.elapsedRealtime() - adapterStarted
+                )
                 val source = heroSource(shelf)
                 heroController.submit(
                     source,
@@ -201,7 +256,6 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
                 )
             }
         }
-        loadSupplementalHeroCandidates()
     }
 
     private fun createShelfView(shelf: DiscoveryShelf): View {
@@ -226,7 +280,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
                 items,
                 shelf.definition.presentation,
                 shelf.browseRequest,
-                shelf.definition.id,
+                shelf,
                 heroSource(shelf)
             )
             applyRenderingTuning(manager, visibleItemEstimate(shelf.definition.presentation))
@@ -234,9 +288,9 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
             clipToPadding = false
             setPadding(
                 context.dim(R.dimen.tv_screen_margin_horizontal),
-                context.dim(R.dimen.tv_spacing_small),
+                context.dim(R.dimen.tv_shelf_card_inset),
                 context.dim(R.dimen.tv_screen_margin_horizontal),
-                context.dim(R.dimen.tv_spacing_small)
+                context.dim(R.dimen.tv_shelf_card_inset)
             )
             addItemDecoration(
                 TvCardSpacingDecoration(context.dim(R.dimen.tv_card_spacing))
@@ -252,6 +306,12 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
         }
         return LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(
+                0,
+                context.dim(R.dimen.tv_shelf_glass_padding_vertical),
+                0,
+                context.dim(R.dimen.tv_shelf_glass_padding_vertical)
+            )
             addView(title, LinearLayout.LayoutParams(-1, -2))
             addView(recycler, LinearLayout.LayoutParams(-1, height))
             recycler.post { DiscoveryManager.recordRendered(shelf, recycler.childCount) }
@@ -321,7 +381,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
         private val items: List<MediaItem>,
         private val presentation: MediaCardPresentation,
         private val browseRequest: com.piggie.tv.data.discovery.DiscoveryBrowseRequest?,
-        private val shelfId: String,
+        private val shelf: DiscoveryShelf,
         private val heroSource: HeroSource
     ) : RecyclerView.Adapter<MediaCardHolder>() {
         private val firstPosterRecorded = java.util.concurrent.atomic.AtomicBoolean()
@@ -335,13 +395,26 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
 
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val item = items[position]
-            MediaCardFactory.bindView(holder, item, presentation, session, api)
-            if (position == 0 && firstPosterRecorded.compareAndSet(false, true)) {
-                DiscoveryManager.recordFirstPoster(
-                    shelfId,
-                    android.os.SystemClock.elapsedRealtime() - pageLoadStartedAt
-                )
+            val firstPosterCallback = if (position == 0) {
+                {
+                    if (firstPosterRecorded.compareAndSet(false, true)) {
+                        DiscoveryManager.recordFirstPoster(
+                            shelf,
+                            android.os.SystemClock.elapsedRealtime() - pageLoadStartedAt
+                        )
+                    }
+                }
+            } else {
+                null
             }
+            MediaCardFactory.bindView(
+                holder,
+                item,
+                presentation,
+                session,
+                api,
+                onImageReady = firstPosterCallback
+            )
             holder.itemView.setOnClickListener {
                 if (item.type == "ViewMore") {
                     browseRequest?.let { request ->
@@ -368,7 +441,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute {
         override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
 
         override fun onViewRecycled(holder: MediaCardHolder) {
-            holder.image.dispose()
+            MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
             holder.itemView.onFocusChangeListener = null
             super.onViewRecycled(holder)

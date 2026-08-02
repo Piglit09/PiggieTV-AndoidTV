@@ -2,6 +2,7 @@ package com.piggie.tv.ui.player
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,6 +18,7 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
@@ -25,6 +27,8 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.C
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -43,7 +47,14 @@ import com.piggie.tv.data.playback.NextEpisodeAutoplayPolicy
 import com.piggie.tv.data.playback.PendingPlaybackPreference
 import com.piggie.tv.data.playback.PendingPlaybackPreferences
 import com.piggie.tv.data.playback.PlaybackNegotiator
+import com.piggie.tv.data.playback.PlaybackOriginPolicy
 import com.piggie.tv.data.playback.PlaybackStream
+import com.piggie.tv.data.playback.PlaybackTrackCandidate
+import com.piggie.tv.data.playback.PlaybackTrackPolicy
+import com.piggie.tv.data.playback.PlaybackTrackResolution
+import com.piggie.tv.data.playback.PlaybackTrackRouteResultPolicy
+import com.piggie.tv.data.playback.PlaybackTrackType
+import com.piggie.tv.data.playback.PlaybackSubtitleSidecarPolicy
 import com.piggie.tv.data.playback.SubtitleSelectionMode
 import com.piggie.tv.data.playback.UP_NEXT_THRESHOLD_MS
 import com.piggie.tv.data.playback.UpNextOverlayAction
@@ -90,7 +101,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
     private val requestGeneration = AtomicInteger(0)
     private val transitionInFlight = AtomicBoolean(false)
-    private val stoppedItems = ConcurrentHashMap.newKeySet<String>()
+    private val stopReportState = PlaybackStopReportState()
     private val nextCallbacks = mutableListOf<(com.piggie.tv.data.models.MediaItem?) -> Unit>()
     private val apiWorkers = ConcurrentHashMap<Thread, NativeRequestScope>()
     private val apiWorkerKeys = ConcurrentHashMap<String, Thread>()
@@ -110,15 +121,39 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var autoplayCanceled = false
     private var playbackError = false
     private var activityForeground = false
+    @Volatile private var userExitRequested = false
     private var destroyed = false
     private var lastKnownPositionMs = 0L
     private var bufferingEvents = 0
     private val hideTemporaryStatus = Runnable { statusView.isVisible = false }
+    private var pendingTrackRouteChange: Runnable? = null
+    private var trackSelectionGeneration = 0
+    private var sidecarFallbackAttemptedSelection: TrackSelectionSnapshot? = null
 
     private var audioIndex: Int? = null
     private var subtitleIndex: Int? = null
     private var subtitleMode: SubtitleSelectionMode = SubtitleSelectionMode.DEFAULT
     private var currentStream: PlaybackStream? = null
+    private var serverTrackSelection: TrackSelectionSnapshot? = null
+    private var appliedTrackSelection = TrackSelectionSnapshot()
+    private var lastTrackResolutionLog: String? = null
+
+    private data class TrackSelectionSnapshot(
+        val audioIndex: Int? = null,
+        val subtitleMode: SubtitleSelectionMode = SubtitleSelectionMode.DEFAULT,
+        val subtitleIndex: Int? = null
+    ) {
+        val hasExplicitTrack: Boolean
+            get() = audioIndex != null ||
+                (subtitleMode == SubtitleSelectionMode.TRACK && subtitleIndex != null)
+    }
+
+    private data class PreparedPlayback(
+        val details: com.piggie.tv.data.models.MediaItem,
+        val stream: PlaybackStream,
+        val selection: TrackSelectionSnapshot,
+        val serverSelection: TrackSelectionSnapshot?
+    )
 
     private fun launchApiWork(key: String, name: String, action: () -> Unit) {
         if (destroyed) return
@@ -168,6 +203,14 @@ class VideoPlayerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_video_player)
         playerView = findViewById(R.id.player_view)
         statusView = findViewById(R.id.player_status)
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    requestUserExit()
+                }
+            }
+        )
 
         MusicPlaybackManager.stop()
         session = store.read() ?: run { finish(); return }
@@ -277,6 +320,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                     }
                     Player.STATE_READY -> {
                         statusView.isVisible = false
+                        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
                         startProgressLoops()
                         PtvDiagnosticsManager.routeVisible("player", "player_view")
                         PtvDiagnosticsManager.routeInteractive("player", "player_view")
@@ -291,7 +335,15 @@ class VideoPlayerActivity : AppCompatActivity() {
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                applyRequestedTrackSelection(
+                    tracks,
+                    allowRouteChange = player.playbackState == Player.STATE_READY
+                )
+            }
+
             override fun onPlayerError(error: PlaybackException) {
+                if (attemptExternalSubtitleServerFallback(error)) return
                 playbackError = true
                 stopProgressLoops()
                 PTVLog.e("Player error item=${PTVLog.mask(itemId)} code=${error.errorCodeName}", error)
@@ -304,10 +356,19 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
 
     /** Negotiates and prepares an item on the one activity-owned ExoPlayer. */
-    private fun prepareItem(newItemId: String, startTicks: Long) {
+    private fun prepareItem(
+        newItemId: String,
+        startTicks: Long,
+        forceServerTrackSelection: Boolean = false
+    ) {
+        cancelPendingTrackRouteChange()
         cancelAllApiWork()
         val requestedAt = android.os.SystemClock.elapsedRealtime()
         val generation = requestGeneration.incrementAndGet()
+        val requestedSelection = requestedTrackSelection()
+        val cachedDetails = currentItem
+            ?.takeIf { it.id == newItemId && hasPlaybackTracks(it) }
+            ?: MediaDetailsSeedStore.getItem(newItemId)?.takeIf(::hasPlaybackTracks)
         resetNextEpisodeState()
         playbackError = false
         showStatus("Loading video…")
@@ -320,56 +381,62 @@ class VideoPlayerActivity : AppCompatActivity() {
 
         launchApiWork(WORK_NEGOTIATION, "ptv-playback-negotiate") {
             runCatching {
-                val details = api.loadItem(session, newItemId)
-                val validAudio = audioIndex?.takeIf { selected -> details.audioTracks.any { it.index == selected } }
-                val validSubtitle = subtitleIndex?.takeIf { selected -> details.subtitleTracks.any { it.index == selected } }
-                val stream = negotiator.getPlaybackStream(session, newItemId, startTicks, validAudio, validSubtitle)
-                Triple(details, stream, validAudio to validSubtitle)
-            }.onSuccess { (details, stream, selections) ->
+                val details = cachedDetails ?: api.loadItem(session, newItemId)
+                val validAudio = requestedSelection.audioIndex
+                    ?.takeIf { selected -> details.audioTracks.any { it.index == selected } }
+                val validSubtitle = if (
+                    requestedSelection.subtitleMode == SubtitleSelectionMode.TRACK
+                ) {
+                    requestedSelection.subtitleIndex?.takeIf { selected ->
+                        details.subtitleTracks.any { it.index == selected }
+                    }
+                } else {
+                    null
+                }
+                val validSelection = TrackSelectionSnapshot(
+                    audioIndex = validAudio,
+                    subtitleMode = if (
+                        requestedSelection.subtitleMode == SubtitleSelectionMode.TRACK &&
+                        validSubtitle == null
+                    ) {
+                        SubtitleSelectionMode.DEFAULT
+                    } else {
+                        requestedSelection.subtitleMode
+                    },
+                    subtitleIndex = validSubtitle
+                )
+                val selectedOnServer = validSelection.takeIf {
+                    forceServerTrackSelection && it.hasExplicitTrack
+                }
+                val stream = negotiator.getPlaybackStream(
+                    session = session,
+                    itemId = newItemId,
+                    positionTicks = startTicks,
+                    audioIndex = selectedOnServer?.audioIndex,
+                    subtitleIndex = selectedOnServer?.subtitleIndex,
+                    preferredMediaSourceId = details.mediaSourceId
+                )
+                PreparedPlayback(details, stream, validSelection, selectedOnServer)
+            }.onSuccess { prepared ->
                 runOnUiThread {
                     if (destroyed || generation != requestGeneration.get()) return@runOnUiThread
-                    itemId = newItemId
-                    currentItem = details
-                    currentStream = stream
-                    playSessionId = stream.playSessionId
-                    audioIndex = selections.first
-                    subtitleIndex = selections.second
-                    if (subtitleMode == SubtitleSelectionMode.TRACK && subtitleIndex == null) {
-                        subtitleMode = SubtitleSelectionMode.DEFAULT
-                    }
-                    lastKnownPositionMs = startTicks / TICKS_PER_MILLISECOND
-
-                    findViewById<TextView>(R.id.player_title)?.text = details.title
-                    findViewById<TextView>(R.id.player_subtitle)?.text = details.seriesName ?: details.year
-
-                    val mediaItem = MediaItem.Builder()
-                        .setMediaId(newItemId)
-                        .setUri(stream.url)
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle(details.title)
-                                .setSubtitle(details.seriesName ?: details.episodeLabel)
-                                .build()
-                        )
-                        .build()
-                    player.setMediaItem(mediaItem, startTicks / TICKS_PER_MILLISECOND)
-                    applySubtitleSelectionMode()
+                    installPreparedPlayback(prepared, startTicks)
                     player.prepare()
                     player.playWhenReady = true
                     player.play()
-                    api.reportPlaying(session, newItemId, stream.playSessionId, startTicks)
+                    api.reportPlaying(session, newItemId, prepared.stream.playSessionId, startTicks)
                     PtvDiagnosticsManager.recordPlayback(
                         PtvPlaybackTrace(
                             itemId = newItemId,
                             event = "prepared",
-                            playMethod = stream.method,
-                            mediaSourceId = PTVLog.mask(stream.mediaSourceId),
-                            codecs = listOfNotNull(stream.videoCodec, stream.audioCodec).joinToString("/"),
-                            container = stream.container,
-                            resolution = if (stream.width != null && stream.height != null) "${stream.width}x${stream.height}" else null,
-                            bitrate = stream.bitrate,
-                            connectionSpeed = stream.connectionSpeed,
-                            negotiatedBitrate = stream.negotiatedMaxBitrate,
+                            playMethod = prepared.stream.method,
+                            mediaSourceId = PTVLog.mask(prepared.stream.mediaSourceId),
+                            codecs = listOfNotNull(prepared.stream.videoCodec, prepared.stream.audioCodec).joinToString("/"),
+                            container = prepared.stream.container,
+                            resolution = if (prepared.stream.width != null && prepared.stream.height != null) "${prepared.stream.width}x${prepared.stream.height}" else null,
+                            bitrate = prepared.stream.bitrate,
+                            connectionSpeed = prepared.stream.connectionSpeed,
+                            negotiatedBitrate = prepared.stream.negotiatedMaxBitrate,
                             startupMs = android.os.SystemClock.elapsedRealtime() - requestedAt,
                             bufferCount = bufferingEvents,
                             audioTrack = audioIndex?.toString(),
@@ -378,7 +445,8 @@ class VideoPlayerActivity : AppCompatActivity() {
                     )
                     transitionInFlight.set(false)
                     updateControlState()
-                    PTVLog.i("Playback prepared item=${PTVLog.mask(newItemId)} session=${PTVLog.mask(stream.playSessionId)}")
+                    applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                    PTVLog.i("Playback prepared item=${PTVLog.mask(newItemId)} session=${PTVLog.mask(prepared.stream.playSessionId)}")
                 }
             }.onFailure { error ->
                 runOnUiThread {
@@ -395,14 +463,319 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun applySubtitleSelectionMode() {
-        player.trackSelectionParameters = player.trackSelectionParameters
-            .buildUpon()
-            .setTrackTypeDisabled(
-                C.TRACK_TYPE_TEXT,
-                subtitleMode == SubtitleSelectionMode.OFF
+    private fun hasPlaybackTracks(item: com.piggie.tv.data.models.MediaItem): Boolean =
+        item.audioTracks.isNotEmpty() || item.subtitleTracks.isNotEmpty()
+
+    private fun installPreparedPlayback(prepared: PreparedPlayback, startTicks: Long) {
+        itemId = prepared.details.id
+        currentItem = prepared.details
+        currentStream = prepared.stream
+        playSessionId = prepared.stream.playSessionId
+        serverTrackSelection = prepared.serverSelection
+        audioIndex = prepared.selection.audioIndex
+        subtitleMode = prepared.selection.subtitleMode
+        subtitleIndex = prepared.selection.subtitleIndex
+        lastKnownPositionMs = startTicks / TICKS_PER_MILLISECOND
+
+        findViewById<TextView>(R.id.player_title)?.text = prepared.details.title
+        findViewById<TextView>(R.id.player_subtitle)?.text =
+            prepared.details.seriesName ?: prepared.details.year
+
+        player.setMediaItem(
+            buildPlayerMediaItem(prepared.details, prepared.stream),
+            startTicks / TICKS_PER_MILLISECOND
+        )
+        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = false)
+    }
+
+    private fun requestedTrackSelection() = TrackSelectionSnapshot(
+        audioIndex = audioIndex,
+        subtitleMode = subtitleMode,
+        subtitleIndex = subtitleIndex.takeIf { subtitleMode == SubtitleSelectionMode.TRACK }
+    )
+
+    private fun buildPlayerMediaItem(
+        details: com.piggie.tv.data.models.MediaItem,
+        stream: PlaybackStream
+    ): MediaItem {
+        val subtitles = if (serverTrackSelection == null) {
+            details.subtitleTracks.mapNotNull { track ->
+                if (!track.isExternal || !track.supportsExternalStream) {
+                    return@mapNotNull null
+                }
+                val url = externalSubtitleUrl(details.id, stream.mediaSourceId, track)
+                    ?: return@mapNotNull null
+                val mimeType = PlaybackSubtitleSidecarPolicy.mimeType(track.codec, url)
+                    ?: return@mapNotNull null
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
+                    .setMimeType(mimeType)
+                    .setLanguage(track.language)
+                    .setLabel(track.title)
+                    .setId("ptv-subtitle-${track.index}")
+                    .setSelectionFlags(
+                        (if (
+                            track.isDefault ||
+                            (subtitleMode == SubtitleSelectionMode.TRACK && subtitleIndex == track.index)
+                        ) C.SELECTION_FLAG_DEFAULT else 0) or
+                            (if (track.isForced) C.SELECTION_FLAG_FORCED else 0)
+                    )
+                    .build()
+            }
+        } else {
+            emptyList()
+        }
+        PTVLog.i(
+            "Playback external subtitle sidecars=${subtitles.size} " +
+                "selected=${subtitleIndex?.toString() ?: "none"}"
+        )
+
+        return MediaItem.Builder()
+            .setMediaId(details.id)
+            .setUri(stream.url)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(details.title)
+                    .setSubtitle(details.seriesName ?: details.episodeLabel)
+                    .build()
             )
+            .apply {
+                if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles)
+            }
             .build()
+    }
+
+    private fun externalSubtitleUrl(
+        mediaItemId: String,
+        mediaSourceId: String,
+        track: com.piggie.tv.data.models.SubtitleTrack
+    ): String? = runCatching {
+        track.deliveryUrl?.takeIf(String::isNotBlank)?.let { deliveryUrl ->
+            PlaybackOriginPolicy.resolve(session.serverUrl, deliveryUrl)
+        } ?: PlaybackOriginPolicy.resolve(
+            session.serverUrl,
+            "/Videos/${Uri.encode(mediaItemId)}/${Uri.encode(mediaSourceId)}/" +
+                "Subtitles/${track.index}/Stream.vtt"
+        )
+    }.getOrNull()
+
+    private fun attemptExternalSubtitleServerFallback(error: PlaybackException): Boolean {
+        val desired = requestedTrackSelection()
+        if (sidecarFallbackAttemptedSelection == desired && transitionInFlight.get()) {
+            // Media3 can surface more than one error callback while the failed sidecar source is
+            // being replaced. Keep the first server recovery authoritative.
+            return true
+        }
+        val selectedSubtitle = currentItem?.subtitleTracks?.firstOrNull { track ->
+            desired.subtitleMode == SubtitleSelectionMode.TRACK &&
+                track.index == desired.subtitleIndex
+        }
+        val selectedSidecarUrl = selectedSubtitle?.let { track ->
+            currentStream?.let { stream ->
+                externalSubtitleUrl(itemId, stream.mediaSourceId, track)
+            }
+        }
+        val shouldFallback = PlaybackSubtitleSidecarPolicy.shouldAttemptServerFallback(
+            hasServerSelection = serverTrackSelection != null,
+            hasExplicitExternalSubtitle = selectedSubtitle?.let { track ->
+                track.isExternal &&
+                    track.supportsExternalStream &&
+                    PlaybackSubtitleSidecarPolicy.mimeType(track.codec, selectedSidecarUrl) != null
+            } == true,
+            alreadyAttempted = sidecarFallbackAttemptedSelection == desired ||
+                transitionInFlight.get()
+        )
+        if (!shouldFallback) return false
+
+        sidecarFallbackAttemptedSelection = desired
+        playbackError = false
+        stopProgressLoops()
+        PTVLog.e(
+            "External subtitle playback failed; retrying with server encoding " +
+                "item=${PTVLog.mask(itemId)} code=${error.errorCodeName}",
+            error
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = itemId,
+                event = "subtitle_sidecar_fallback",
+                detail = error.errorCodeName,
+                subtitleTrack = desired.subtitleIndex?.toString()
+            )
+        )
+        showStatus("Retrying subtitles with server compatibility modeâ€¦")
+        requestTrackRoute(forceServerTrackSelection = true)
+        return true
+    }
+
+    private fun applyRequestedTrackSelection(
+        tracks: Tracks,
+        allowRouteChange: Boolean
+    ): Boolean {
+        if (!::player.isInitialized) return false
+        val details = currentItem ?: return false
+        val desired = requestedTrackSelection()
+        val candidates = playbackTrackCandidates(tracks)
+        val desiredAudioTrack = details.audioTracks.firstOrNull {
+            it.index == desired.audioIndex
+        }
+        val desiredSubtitleTrack = details.subtitleTracks.firstOrNull {
+            desired.subtitleMode == SubtitleSelectionMode.TRACK &&
+                it.index == desired.subtitleIndex
+        }
+        val builder = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setPreferredAudioLanguage(desiredAudioTrack?.language)
+            .setPreferredTextLanguage(desiredSubtitleTrack?.language)
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, desired.subtitleMode == SubtitleSelectionMode.OFF)
+
+        val activeServerSelection = serverTrackSelection
+        if (activeServerSelection != null) {
+            player.trackSelectionParameters = builder.build()
+            if (activeServerSelection == desired) {
+                cancelPendingTrackRouteChange()
+                appliedTrackSelection = desired
+                return true
+            }
+            if (allowRouteChange) {
+                cancelPendingTrackRouteChange()
+                requestTrackRoute(desired.hasExplicitTrack)
+            }
+            return false
+        }
+
+        var needsRouteChange = false
+        if (desired.audioIndex != null) {
+            val resolution = desiredAudioTrack?.let {
+                PlaybackTrackPolicy.selectAudio(
+                    track = it,
+                    candidates = candidates,
+                    targetOrdinal = details.audioTracks.indexOf(it)
+                )
+            }
+            logUnresolvedCandidates("audio", resolution, candidates)
+            if (!applyTrackResolution(builder, tracks, resolution)) needsRouteChange = true
+        }
+
+        if (desired.subtitleMode == SubtitleSelectionMode.TRACK) {
+            val resolution = desiredSubtitleTrack?.let {
+                PlaybackTrackPolicy.selectSubtitle(
+                    track = it,
+                    candidates = candidates,
+                    targetOrdinal = details.subtitleTracks.indexOf(it)
+                )
+            }
+            logUnresolvedCandidates("text", resolution, candidates)
+            if (!applyTrackResolution(builder, tracks, resolution)) needsRouteChange = true
+        }
+
+        player.trackSelectionParameters = builder.build()
+        if (!needsRouteChange) {
+            cancelPendingTrackRouteChange()
+            appliedTrackSelection = desired
+            return true
+        }
+        if (allowRouteChange) scheduleTrackRouteChange(desired)
+        return false
+    }
+
+    private fun scheduleTrackRouteChange(expected: TrackSelectionSnapshot) {
+        if (pendingTrackRouteChange != null || transitionInFlight.get()) return
+        val runnable = Runnable {
+            pendingTrackRouteChange = null
+            if (
+                !destroyed &&
+                expected == requestedTrackSelection() &&
+                !applyRequestedTrackSelection(player.currentTracks, allowRouteChange = false)
+            ) {
+                requestTrackRoute(forceServerTrackSelection = true)
+            }
+        }
+        pendingTrackRouteChange = runnable
+        handler.postDelayed(runnable, TRACK_DISCOVERY_GRACE_MS)
+    }
+
+    private fun cancelPendingTrackRouteChange() {
+        pendingTrackRouteChange?.let(handler::removeCallbacks)
+        pendingTrackRouteChange = null
+    }
+
+    private fun applyTrackResolution(
+        builder: androidx.media3.common.TrackSelectionParameters.Builder,
+        tracks: Tracks,
+        resolution: PlaybackTrackResolution?
+    ): Boolean {
+        val selected = resolution as? PlaybackTrackResolution.Selected ?: run {
+            val message = "Media3 track unresolved result=${resolution?.javaClass?.simpleName ?: "MissingMetadata"}"
+            if (message != lastTrackResolutionLog) {
+                lastTrackResolutionLog = message
+                PTVLog.i(message)
+            }
+            return false
+        }
+        val group = tracks.groups.getOrNull(selected.candidate.groupIndex) ?: return false
+        if (selected.candidate.trackIndex !in 0 until group.length) return false
+        builder.setOverrideForType(
+            TrackSelectionOverride(group.mediaTrackGroup, selected.candidate.trackIndex)
+        )
+        val message = "Media3 ${selected.candidate.type.name.lowercase()} track applied " +
+            "group=${selected.candidate.groupIndex} track=${selected.candidate.trackIndex} " +
+            "match=${selected.matchedBy}"
+        if (message != lastTrackResolutionLog) {
+            lastTrackResolutionLog = message
+            PTVLog.i(message)
+        }
+        return true
+    }
+
+    private fun logUnresolvedCandidates(
+        kind: String,
+        resolution: PlaybackTrackResolution?,
+        candidates: List<PlaybackTrackCandidate>
+    ) {
+        if (resolution is PlaybackTrackResolution.Selected) return
+        val type = if (kind == "audio") PlaybackTrackType.AUDIO else PlaybackTrackType.TEXT
+        val summary = candidates.filter { it.type == type }.joinToString(";") { candidate ->
+            "${candidate.groupIndex}:${candidate.trackIndex}," +
+                "id=${candidate.externalId ?: "-"},lang=${candidate.language ?: "-"}," +
+                "mime=${candidate.mimeType ?: "-"},codec=${candidate.codec ?: "-"}," +
+                "ch=${candidate.channelCount ?: 0},supported=${candidate.isSupported}"
+        }.ifBlank { "none" }
+        val message = "Media3 $kind candidates unresolved: $summary"
+        if (message != lastTrackResolutionLog) {
+            lastTrackResolutionLog = message
+            PTVLog.i(message)
+        }
+    }
+
+    private fun playbackTrackCandidates(tracks: Tracks): List<PlaybackTrackCandidate> = buildList {
+        tracks.groups.forEachIndexed { groupIndex, group ->
+            val type = when (group.type) {
+                C.TRACK_TYPE_AUDIO -> PlaybackTrackType.AUDIO
+                C.TRACK_TYPE_TEXT -> PlaybackTrackType.TEXT
+                else -> return@forEachIndexed
+            }
+            for (trackIndex in 0 until group.length) {
+                val format = group.getTrackFormat(trackIndex)
+                add(
+                    PlaybackTrackCandidate(
+                        type = type,
+                        groupIndex = groupIndex,
+                        trackIndex = trackIndex,
+                        language = format.language,
+                        label = format.label,
+                        mimeType = format.sampleMimeType,
+                        codec = format.codecs,
+                        channelCount = format.channelCount.takeIf { it > 0 },
+                        isSupported = group.isTrackSupported(trackIndex),
+                        externalId = format.id,
+                        isDefault = format.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0,
+                        isForced = format.selectionFlags and C.SELECTION_FLAG_FORCED != 0
+                    )
+                )
+            }
+        }
     }
 
     private val reportRunnable = object : Runnable {
@@ -587,7 +960,12 @@ class VideoPlayerActivity : AppCompatActivity() {
         launchApiWork(WORK_NEXT_TRANSITION, "ptv-next-transition") {
             reportStoppedBlockingOnce(oldItemId, oldSessionId, finalTicks)
             runOnUiThread {
-                if (!destroyed && generation == requestGeneration.get()) {
+                if (
+                    !destroyed &&
+                    !userExitRequested &&
+                    generation == requestGeneration.get()
+                ) {
+                    applyPendingPreference(next.id)
                     prepareItem(next.id, 0L)
                 }
             }
@@ -595,25 +973,61 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun reportStoppedBlockingOnce(id: String, sessionId: String, ticks: Long) {
-        if (!stoppedItems.add(id)) return
-        runCatching { api.reportStoppedNow(session, id, sessionId, ticks) }
+        val decision = stopReportState.begin(id, sessionId, ticks)
+        if (decision !is PlaybackStopReportDecision.Claimed) return
+        sendClaimedStopReportBlocking(decision.report, retryAsyncOnFailure = !userExitRequested)
+    }
+
+    private fun sendClaimedStopReportBlocking(
+        report: PlaybackStopReport,
+        retryAsyncOnFailure: Boolean
+    ) {
+        runCatching {
+            api.reportStoppedNow(
+                session,
+                report.itemId,
+                report.playSessionId,
+                report.positionTicks
+            )
+        }
             .onFailure {
-                PTVLog.e("Stopped report failed item=${PTVLog.mask(id)}", it)
-                if (!destroyed && !Thread.currentThread().isInterrupted) {
-                    api.reportStopped(session, id, sessionId, ticks)
+                PTVLog.e("Stopped report failed item=${PTVLog.mask(report.itemId)}", it)
+                if (retryAsyncOnFailure && !destroyed && !Thread.currentThread().isInterrupted) {
+                    api.reportStopped(
+                        session,
+                        report.itemId,
+                        report.playSessionId,
+                        report.positionTicks
+                    )
                 }
             }
+        stopReportState.complete(report)
+        finishAfterSettledStopReportIfRequested()
     }
 
     private fun reportStoppedAsyncIfNeeded() {
         val id = itemId
-        if (!stoppedItems.add(id)) return
-        api.reportStopped(
-            session,
+        val decision = stopReportState.begin(
             id,
             playSessionId.orEmpty(),
             lastKnownPositionMs.coerceAtLeast(player.currentPosition) * TICKS_PER_MILLISECOND
         )
+        if (decision !is PlaybackStopReportDecision.Claimed) return
+        val report = decision.report
+        api.reportStopped(
+            session,
+            report.itemId,
+            report.playSessionId,
+            report.positionTicks
+        )
+        stopReportState.complete(report)
+    }
+
+    private fun finishAfterSettledStopReportIfRequested() {
+        if (!userExitRequested) return
+        runOnUiThread {
+            if (!destroyed && !isFinishing) finish()
+        }
     }
 
     private fun showUpNextOverlay(next: com.piggie.tv.data.models.MediaItem) {
@@ -784,10 +1198,48 @@ class VideoPlayerActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    private fun requestUserExit() {
+        if (userExitRequested || destroyed) return
+        userExitRequested = true
+        activityForeground = false
+        autoplayCanceled = true
+        stopProgressLoops()
+        removeUpNextOverlay()
+
+        if (!::player.isInitialized || !::itemId.isInitialized || !::session.isInitialized) {
+            finish()
+            return
+        }
+
+        lastKnownPositionMs = player.currentPosition.coerceAtLeast(lastKnownPositionMs)
+        player.pause()
+        val decision = stopReportState.begin(
+            itemId,
+            playSessionId.orEmpty(),
+            lastKnownPositionMs * TICKS_PER_MILLISECOND
+        )
+        when (decision) {
+            is PlaybackStopReportDecision.Claimed -> {
+                transitionInFlight.set(true)
+                launchApiWork(WORK_USER_EXIT, "ptv-player-user-exit") {
+                    sendClaimedStopReportBlocking(decision.report, retryAsyncOnFailure = false)
+                }
+            }
+            PlaybackStopReportDecision.InFlight -> Unit
+            PlaybackStopReportDecision.Complete,
+            PlaybackStopReportDecision.NoActiveSession -> finish()
+        }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (upNextOverlay != null && handleUpNextKey(keyCode)) return true
         if (playbackError && keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
-            prepareItem(itemId, lastKnownPositionMs * TICKS_PER_MILLISECOND)
+            prepareItem(
+                itemId,
+                lastKnownPositionMs * TICKS_PER_MILLISECOND,
+                forceServerTrackSelection = serverTrackSelection != null ||
+                    sidecarFallbackAttemptedSelection == requestedTrackSelection()
+            )
             return true
         }
         if (playerView.isControllerFullyVisible) {
@@ -969,7 +1421,7 @@ class VideoPlayerActivity : AppCompatActivity() {
             settings.connectionSpeed = options[choice].wireValue
             updateControlState()
             recordPlayerDialog("connection_speed", startedAt)
-            restartPlayback()
+            restartPlayback(forceServerTrackSelection = serverTrackSelection != null)
         }
         showPlayerSelectionDialog(dialog, opener)
     }
@@ -1033,21 +1485,160 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun switchAudio(index: Int?) {
+        cancelPendingTrackRouteChange()
+        val previous = requestedTrackSelection()
         audioIndex = index
+        noteTrackSelectionChanged(previous)
         PendingPlaybackPreferences.setAudio(itemId, index)
         updateControlState()
-        restartPlayback()
+        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
     }
 
     private fun switchSubtitle(mode: SubtitleSelectionMode, index: Int?) {
+        cancelPendingTrackRouteChange()
+        val previous = requestedTrackSelection()
         subtitleMode = mode
         subtitleIndex = index.takeIf { mode == SubtitleSelectionMode.TRACK }
+        noteTrackSelectionChanged(previous)
         PendingPlaybackPreferences.setSubtitle(itemId, mode, subtitleIndex)
         updateControlState()
-        restartPlayback()
+        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
     }
 
-    private fun restartPlayback() {
+    private fun requestTrackRoute(forceServerTrackSelection: Boolean) {
+        cancelPendingTrackRouteChange()
+        if (!transitionInFlight.compareAndSet(false, true)) return
+        val details = currentItem ?: run {
+            transitionInFlight.set(false)
+            return
+        }
+        val requested = requestedTrackSelection()
+        val selectionGeneration = trackSelectionGeneration
+        val generation = requestGeneration.get()
+        val requestedPositionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+        val serverSelection = requested.takeIf {
+            forceServerTrackSelection && it.hasExplicitTrack
+        }
+        showTemporaryStatus("Switching track...")
+
+        launchApiWork(WORK_TRACK_ROUTE, "ptv-player-track-route") {
+            runCatching {
+                val stream = negotiator.getPlaybackStream(
+                    session = session,
+                    itemId = details.id,
+                    positionTicks = requestedPositionTicks,
+                    audioIndex = serverSelection?.audioIndex,
+                    subtitleIndex = serverSelection?.subtitleIndex,
+                    preferredMediaSourceId = details.mediaSourceId
+                )
+                PreparedPlayback(details, stream, requested, serverSelection)
+            }.onSuccess { prepared ->
+                runOnUiThread {
+                    if (destroyed || generation != requestGeneration.get()) return@runOnUiThread
+                    if (!PlaybackTrackRouteResultPolicy.isCurrent(
+                            requestedGeneration = selectionGeneration,
+                            currentGeneration = trackSelectionGeneration,
+                            selectionMatches = requestedTrackSelection() == requested
+                        )
+                    ) {
+                        transitionInFlight.set(false)
+                        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        return@runOnUiThread
+                    }
+
+                    val oldItemId = itemId
+                    val oldSessionId = playSessionId.orEmpty()
+                    val resumeTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+                    reportSessionStoppedAsync(oldItemId, oldSessionId, resumeTicks)
+                    stopProgressLoops()
+                    player.pause()
+                    installPreparedPlayback(prepared, resumeTicks)
+                    player.prepare()
+                    player.playWhenReady = true
+                    player.play()
+                    api.reportPlaying(session, itemId, prepared.stream.playSessionId, resumeTicks)
+                    appliedTrackSelection = requested
+                    transitionInFlight.set(false)
+                    updateControlState()
+                    PTVLog.i(
+                        "Playback track route prepared item=${PTVLog.mask(itemId)} " +
+                            "method=${prepared.stream.method}"
+                    )
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    if (destroyed || generation != requestGeneration.get()) return@runOnUiThread
+                    if (!PlaybackTrackRouteResultPolicy.isCurrent(
+                            requestedGeneration = selectionGeneration,
+                            currentGeneration = trackSelectionGeneration,
+                            selectionMatches = requestedTrackSelection() == requested
+                        )
+                    ) {
+                        transitionInFlight.set(false)
+                        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        return@runOnUiThread
+                    }
+                    transitionInFlight.set(false)
+                    PTVLog.e("Playback track route failed item=${PTVLog.mask(itemId)}", error)
+                    if (sidecarFallbackAttemptedSelection == requested) {
+                        playbackError = true
+                        showStatus("Unable to load that subtitle. Press Select to retry with server compatibility mode or Back to exit.")
+                    } else {
+                        restoreAppliedTrackSelection()
+                        showTemporaryStatus("Couldn't switch that track. Current playback continues.")
+                        if (player.playbackState == Player.STATE_READY) player.play()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun reportSessionStoppedAsync(
+        stoppedItemId: String,
+        stoppedSessionId: String,
+        positionTicks: Long
+    ) {
+        val decision = stopReportState.begin(stoppedItemId, stoppedSessionId, positionTicks)
+        if (decision !is PlaybackStopReportDecision.Claimed) return
+        api.reportStopped(
+            session,
+            decision.report.itemId,
+            decision.report.playSessionId,
+            decision.report.positionTicks
+        )
+        stopReportState.complete(decision.report)
+    }
+
+    private fun restoreAppliedTrackSelection() {
+        val previous = requestedTrackSelection()
+        audioIndex = appliedTrackSelection.audioIndex
+        subtitleMode = appliedTrackSelection.subtitleMode
+        subtitleIndex = appliedTrackSelection.subtitleIndex
+        noteTrackSelectionChanged(previous)
+        PendingPlaybackPreferences.setAudio(itemId, audioIndex)
+        PendingPlaybackPreferences.setSubtitle(itemId, subtitleMode, subtitleIndex)
+        updateControlState()
+        applyRequestedTrackSelection(player.currentTracks, allowRouteChange = false)
+    }
+
+    private fun applyPendingPreference(itemId: String) {
+        val preference = PendingPlaybackPreferences.get(itemId)
+        audioIndex = preference.audioIndex
+        subtitleMode = preference.subtitleMode
+        subtitleIndex = preference.subtitleIndex
+        serverTrackSelection = null
+        appliedTrackSelection = TrackSelectionSnapshot()
+        trackSelectionGeneration += 1
+        sidecarFallbackAttemptedSelection = null
+    }
+
+    private fun noteTrackSelectionChanged(previous: TrackSelectionSnapshot) {
+        if (requestedTrackSelection() == previous) return
+        trackSelectionGeneration += 1
+        sidecarFallbackAttemptedSelection = null
+    }
+
+    private fun restartPlayback(forceServerTrackSelection: Boolean = false) {
         if (!transitionInFlight.compareAndSet(false, true)) return
         val positionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
         val currentId = itemId
@@ -1057,11 +1648,17 @@ class VideoPlayerActivity : AppCompatActivity() {
         player.pause()
         launchApiWork(WORK_RESTART, "ptv-player-restart") {
             reportStoppedBlockingOnce(currentId, currentSession, positionTicks)
-            // A restart is a new Jellyfin session for the same item.
-            stoppedItems.remove(currentId)
             runOnUiThread {
-                if (!destroyed && generation == requestGeneration.get()) {
-                    prepareItem(currentId, positionTicks)
+                if (
+                    !destroyed &&
+                    !userExitRequested &&
+                    generation == requestGeneration.get()
+                ) {
+                    prepareItem(
+                        currentId,
+                        positionTicks,
+                        forceServerTrackSelection = forceServerTrackSelection
+                    )
                 }
             }
         }
@@ -1070,6 +1667,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         destroyed = true
         requestGeneration.incrementAndGet()
+        cancelPendingTrackRouteChange()
         handler.removeCallbacks(restorePlayerDialogControllerTimeout)
         pendingPlayerDialogTimeoutRestoreToken = null
         playerDialogTimeoutState.clear()
@@ -1102,11 +1700,13 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val CANCEL_CONFIRMATION_MS = 8_000L
         private const val PLAYER_DIALOG_WINDOW_SETTLE_MS = 100L
         private const val PLAYER_DIALOG_RESTORE_TIMEOUT_MS = 10_000
+        private const val TRACK_DISCOVERY_GRACE_MS = 1_500L
         private const val WORK_NEGOTIATION = "negotiation"
         private const val WORK_NEXT_LOOKUP = "next_lookup"
         private const val WORK_NEXT_TRANSITION = "next_transition"
         private const val WORK_RESTART = "restart"
-
+        private const val WORK_TRACK_ROUTE = "track_route"
+        private const val WORK_USER_EXIT = "user_exit"
         fun start(
             context: Context,
             itemId: String,

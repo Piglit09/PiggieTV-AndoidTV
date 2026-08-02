@@ -31,4 +31,15 @@ object NativeRouteNavigator {
         NativeRoute.SETTINGS,
         NativeRoute.PROFILE -> NativeRoute.HOME
     }
+
+    /**
+     * Chooses the least-recently-used route that is safe to evict from the two-route cache.
+     * The outgoing route is deliberately retained so a single transaction never both caps and
+     * removes the same Fragment while FragmentManager is reordering operations.
+     */
+    fun evictionCandidate(
+        lruRoutes: Iterable<NativeRoute>,
+        target: NativeRoute,
+        outgoing: NativeRoute?
+    ): NativeRoute? = lruRoutes.firstOrNull { route -> route != target && route != outgoing }
 }

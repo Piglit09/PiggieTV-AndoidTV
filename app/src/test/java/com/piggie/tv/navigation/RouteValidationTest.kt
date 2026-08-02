@@ -53,4 +53,28 @@ class RouteValidationTest {
             )
         )
     }
+
+    @Test
+    fun evictionRetainsTargetAndOutgoingRouteEvenWhenOutgoingIsLeastRecentlyUsed() {
+        assertEquals(
+            NativeRoute.MOVIES,
+            NativeRouteNavigator.evictionCandidate(
+                lruRoutes = listOf(NativeRoute.HOME, NativeRoute.MOVIES, NativeRoute.SHOWS),
+                target = NativeRoute.SHOWS,
+                outgoing = NativeRoute.HOME
+            )
+        )
+    }
+
+    @Test
+    fun evictionUsesLeastRecentRouteOutsideTheNormalPreviousAndTargetPair() {
+        assertEquals(
+            NativeRoute.HOME,
+            NativeRouteNavigator.evictionCandidate(
+                lruRoutes = listOf(NativeRoute.HOME, NativeRoute.MOVIES, NativeRoute.SHOWS),
+                target = NativeRoute.SHOWS,
+                outgoing = NativeRoute.MOVIES
+            )
+        )
+    }
 }

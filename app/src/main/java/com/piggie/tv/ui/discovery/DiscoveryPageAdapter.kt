@@ -4,6 +4,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.recyclerview.widget.RecyclerView
+import com.piggie.tv.R
 import com.piggie.tv.data.discovery.DiscoveryShelf
 import com.piggie.tv.data.discovery.ShelfDefinition
 
@@ -27,8 +28,11 @@ class DiscoveryPageAdapter(
     fun updateShelf(shelf: DiscoveryShelf) {
         val index = definitions.indexOfFirst { it.id == shelf.definition.id }
         if (index < 0) return
+        val previous = shelves[shelf.definition.id]
         shelves[shelf.definition.id] = shelf
-        notifyItemChanged(index + headerOffset)
+        if (!DiscoveryShelfUiContentPolicy.matches(previous, shelf)) {
+            notifyItemChanged(index + headerOffset)
+        }
     }
 
     fun refreshHeader() {
@@ -56,7 +60,15 @@ class DiscoveryPageAdapter(
             return HeaderHolder(FrameLayout(parent.context))
         }
         return ShelfHolder(
-            DiscoveryShelfSlotView(parent.context, definitions[viewType])
+            DiscoveryShelfSlotView(parent.context, definitions[viewType]).apply {
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = parent.context.resources.getDimensionPixelSize(R.dimen.tv_shelf_margin_vertical)
+                    bottomMargin = parent.context.resources.getDimensionPixelSize(R.dimen.tv_shelf_margin_vertical)
+                }
+            }
         )
     }
 
@@ -78,17 +90,27 @@ class DiscoveryPageAdapter(
                         holder.slot.showEmpty(
                             requireNotNull(shelf).definition.title,
                             shelf.message
-                        ) {
-                            holder.slot.showLoading(shelf.definition.title)
-                            onRetry(shelf.definition.id)
+                        )
+                    DiscoveryShelfSlotState.ERROR -> {
+                        val failed = requireNotNull(shelf)
+                        val retry = {
+                            holder.slot.showLoading(failed.definition.title, preserveFocus = true)
+                            onRetry(failed.definition.id)
                         }
-                    DiscoveryShelfSlotState.ERROR -> holder.slot.showFailure(
-                        requireNotNull(shelf).definition.title,
-                        shelf.status,
-                        shelf.message
-                    ) {
-                        holder.slot.showLoading(shelf.definition.title)
-                        onRetry(shelf.definition.id)
+                        if (failed.items.isNotEmpty()) {
+                            holder.slot.showStaleFailure(
+                                createShelfContent(failed),
+                                failed.message,
+                                retry
+                            )
+                        } else {
+                            holder.slot.showFailure(
+                                failed.definition.title,
+                                failed.status,
+                                failed.message,
+                                retry
+                            )
+                        }
                     }
                 }
             }
@@ -109,4 +131,27 @@ class DiscoveryPageAdapter(
     private companion object {
         const val HEADER_VIEW_TYPE = Int.MIN_VALUE
     }
+}
+
+/** Excludes generation/timing diagnostics from RecyclerView's visual diff decision. */
+object DiscoveryShelfUiContentPolicy {
+    fun matches(previous: DiscoveryShelf?, current: DiscoveryShelf): Boolean =
+        previous != null &&
+            previous.definition == current.definition &&
+            previous.items == current.items &&
+            previous.status == current.status &&
+            previous.viewMoreItem == current.viewMoreItem &&
+            previous.browseRequest == current.browseRequest &&
+            previous.message == current.message
+}
+
+object DiscoveryShelfActionPolicy {
+    fun canRetry(status: com.piggie.tv.data.discovery.ShelfStatus): Boolean = status in setOf(
+        com.piggie.tv.data.discovery.ShelfStatus.TIMEOUT,
+        com.piggie.tv.data.discovery.ShelfStatus.HTTP_ERROR,
+        com.piggie.tv.data.discovery.ShelfStatus.INVALID_QUERY,
+        com.piggie.tv.data.discovery.ShelfStatus.MISSING_LIBRARY,
+        com.piggie.tv.data.discovery.ShelfStatus.FAILED_RENDER,
+        com.piggie.tv.data.discovery.ShelfStatus.RENDER_ERROR
+    )
 }

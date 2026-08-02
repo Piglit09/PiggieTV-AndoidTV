@@ -2,13 +2,13 @@ package com.piggie.tv.data.discovery
 
 object DiscoveryQueryPlanner {
     const val CARD_FIELDS =
-        "PrimaryImageAspectRatio,ImageTags,BackdropImageTags,ParentBackdropItemId," +
+        "ImageTags,BackdropImageTags,ParentBackdropItemId," +
             "ParentBackdropImageTags,ParentLogoItemId,ParentLogoImageTag," +
             "ParentPrimaryImageItemId,ParentPrimaryImageTag,ProductionYear,UserData," +
-            "OfficialRating,CommunityRating,Genres,Studios,RunTimeTicks,CriticRating," +
+            "OfficialRating,CommunityRating,Genres,RunTimeTicks," +
             "SeriesName,IndexNumber,ParentIndexNumber,Overview"
 
-    const val RECOMMENDATION_FIELDS = "$CARD_FIELDS,People"
+    const val RECOMMENDATION_FIELDS = CARD_FIELDS
 
     /**
      * /Users/{userId}/Items/Resume is already Jellyfin's resumable-items contract. Keep this

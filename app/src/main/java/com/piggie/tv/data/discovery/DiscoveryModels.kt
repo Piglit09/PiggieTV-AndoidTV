@@ -20,6 +20,27 @@ enum class ShelfStatus {
     NO_ITEMS,
     DUPLICATE,
     FAILED_RENDER
+    ,CANCELED_HIDDEN_ROUTE
+    ,CANCELED_REPLACED_REQUEST
+    ,RENDER_ERROR
+}
+
+enum class DiscoveryFinalState {
+    NOT_STARTED, QUEUED, LOADING, CONTENT, EMPTY, TIMEOUT, HTTP_ERROR, INVALID_QUERY, MISSING_LIBRARY,
+    CANCELED_HIDDEN_ROUTE, CANCELED_REPLACED_REQUEST, RENDER_ERROR
+}
+
+fun ShelfStatus.toFinalState(): DiscoveryFinalState = when (this) {
+    ShelfStatus.READY -> DiscoveryFinalState.CONTENT
+    ShelfStatus.EMPTY, ShelfStatus.NO_ITEMS -> DiscoveryFinalState.EMPTY
+    ShelfStatus.LOADING -> DiscoveryFinalState.LOADING
+    ShelfStatus.TIMEOUT -> DiscoveryFinalState.TIMEOUT
+    ShelfStatus.HTTP_ERROR -> DiscoveryFinalState.HTTP_ERROR
+    ShelfStatus.INVALID_QUERY -> DiscoveryFinalState.INVALID_QUERY
+    ShelfStatus.MISSING_LIBRARY -> DiscoveryFinalState.MISSING_LIBRARY
+    ShelfStatus.CANCELED_HIDDEN_ROUTE -> DiscoveryFinalState.CANCELED_HIDDEN_ROUTE
+    ShelfStatus.CANCELED_REPLACED_REQUEST, ShelfStatus.DUPLICATE -> DiscoveryFinalState.CANCELED_REPLACED_REQUEST
+    ShelfStatus.FAILED_RENDER, ShelfStatus.RENDER_ERROR -> DiscoveryFinalState.RENDER_ERROR
 }
 
 enum class DiscoveryShelfType {
@@ -110,6 +131,7 @@ data class PageManifest(
 data class DiscoverySession(
     val id: String,
     val timestamp: Long,
+    val scopeKey: String,
     val randomGenres: MutableList<String> = mutableListOf(),
     val randomStudios: MutableList<String> = mutableListOf(),
     internal val genreByShelf: MutableMap<String, String> = mutableMapOf(),
@@ -164,6 +186,65 @@ data class ShelfDiagnostic(
     val firstPosterMs: Long? = null,
     val renderCompletedMs: Long? = null,
     val timestampMs: Long = System.currentTimeMillis()
+    ,val generationStartedMs: Long? = null
+    ,val requestStartedMs: Long? = null
+    ,val requestFinishedMs: Long? = null
+    ,val cacheAgeMs: Long? = null
+    ,val finalState: DiscoveryFinalState = status.toFinalState()
+    ,val generationId: Long = 0
+    ,val attemptId: Int = retryCount
+    ,val queueWaitMs: Long? = null
+    ,val dnsMs: Long? = null
+    ,val connectMs: Long? = null
+    ,val tlsMs: Long? = null
+    ,val requestWriteMs: Long? = null
+    ,val timeToFirstByteMs: Long? = null
+    ,val responseReadMs: Long? = null
+    ,val responseBytes: Long? = null
+    ,val parseMs: Long? = null
+    ,val filteringMs: Long? = null
+    ,val scoringMs: Long? = null
+    ,val dedupeMs: Long? = null
+    ,val adapterBuildMs: Long? = null
+    ,val firstCardSubmitMs: Long? = null
+    ,val requestAvoided: Boolean = false
+    ,val cacheTtlRemainingMs: Long? = null
+    ,val cacheEntryBytes: Long? = null
+    ,val cacheKeyCategory: String? = null
+    ,val inFlightCoalesced: Boolean = false
+    ,val adapterPresent: Boolean = false
+    ,val networkRequestStarted: Boolean = false
+    ,val transitionOrdinal: Long = 0
+    ,val faultInjectionDelayMs: Long? = null
+    ,val cacheSourceShelfId: String? = null
+    ,val cacheRefreshBypassed: Boolean = false
+)
+
+val ShelfDiagnostic.rawCount: Int get() = resultCount
+val ShelfDiagnostic.eligibleCount: Int get() = filteredCount
+val ShelfDiagnostic.adapterCount: Int get() = renderCount
+
+data class DiscoveryManifestAggregate(
+    val page: DiscoveryPage,
+    val generationId: Long,
+    val expected: Int,
+    val defined: Int,
+    val notStarted: Int,
+    val queued: Int,
+    val requested: Int,
+    val loading: Int,
+    val content: Int,
+    val empty: Int,
+    val failed: Int,
+    val canceled: Int,
+    val renderedShelves: Int,
+    val renderedCards: Int
+)
+
+data class DiscoveryPageDiagnostics(
+    val generationId: Long,
+    val shelves: List<ShelfDiagnostic>,
+    val aggregate: DiscoveryManifestAggregate
 )
 
 data class DiscoveryShelf(

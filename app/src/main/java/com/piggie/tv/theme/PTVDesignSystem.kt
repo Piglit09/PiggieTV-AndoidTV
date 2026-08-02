@@ -4,6 +4,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.view.View
 import android.widget.TextView
+import androidx.appcompat.content.res.AppCompatResources
 import com.piggie.tv.R
 import com.piggie.tv.ui.rendering.TvFocusIndicator
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
@@ -53,21 +54,24 @@ object PTVTypography {
 
 object PTVShapes {
     fun applyFocusEffect(view: View, focused: Boolean) {
-        view.animate().cancel()
         if (view.scaleX != 1f) view.scaleX = 1f
         if (view.scaleY != 1f) view.scaleY = 1f
         if (view.elevation != 0f) view.elevation = 0f
+        if (view.translationZ != 0f) view.translationZ = 0f
         TvFocusIndicator.onFocusChanged(view, focused)
     }
 
     fun applyMediaCardSurface(view: View) {
         val features = TvRenderingRuntime.features()
-        if (features.flatRectangularCards) {
-            view.background = null
-        } else {
+        if (features.iceCardEnabled) {
+            view.setBackgroundResource(R.drawable.tv_ice_card_surface)
+            view.foreground = AppCompatResources.getDrawable(view.context, R.drawable.tv_ice_card_border)
+        } else if (!features.flatRectangularCards) {
             view.setBackgroundResource(R.drawable.tv_media_card_surface)
+            view.foreground = null
+        } else {
+            view.background = null
+            view.foreground = null
         }
-        // Focus is one RecyclerView overlay border registered against artwork bounds.
-        view.foreground = null
     }
 }

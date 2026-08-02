@@ -13,7 +13,6 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
-import coil.dispose
 import com.piggie.tv.R
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.discovery.DiscoveryBrowseRequest
@@ -202,7 +201,7 @@ class LibraryBrowserActivity : AppCompatActivity() {
         override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
 
         override fun onViewRecycled(holder: MediaCardHolder) {
-            holder.image.dispose()
+            MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
             super.onViewRecycled(holder)
         }

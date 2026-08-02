@@ -26,7 +26,9 @@
     <dimen name="tv_text_size_card_title">10sp</dimen>
 
     <!-- Hero -->
+    <!-- Exact total discovery hero RecyclerView row height for TV_COMPACT. -->
     <dimen name="tv_hero_height">170dp</dimen>
+    <dimen name="tv_settings_content_width">720dp</dimen>
     <dimen name="tv_hero_content_width">420dp</dimen>
     <dimen name="tv_hero_logo_max_width">200dp</dimen>
     <dimen name="tv_hero_logo_max_height">40dp</dimen>
@@ -43,9 +45,19 @@
     <dimen name="tv_square_height">112dp</dimen>
     <dimen name="tv_card_padding">4dp</dimen>
     <dimen name="tv_focus_border_width">3dp</dimen>
-    <dimen name="tv_card_spacing">6dp</dimen>
+    <dimen name="tv_media_artwork_corner_radius">9dp</dimen>
+    <dimen name="tv_card_spacing">10dp</dimen>
     <dimen name="tv_card_title_height">28dp</dimen>
-    <dimen name="tv_shelf_extra_height">44dp</dimen>
+    <!-- 36dp fixed metadata body plus 9dp behind the artwork's lower corner cutouts. -->
+    <dimen name="tv_card_metadata_surface_height">45dp</dimen>
+    <dimen name="tv_shelf_extra_height">72dp</dimen>
+    <dimen name="tv_shelf_corner_radius">12dp</dimen>
+    <dimen name="tv_shelf_stroke_width">1dp</dimen>
+    <dimen name="tv_shelf_glass_header_height">48dp</dimen>
+    <dimen name="tv_shelf_glass_padding_vertical">8dp</dimen>
+    <dimen name="tv_shelf_margin_horizontal">10dp</dimen>
+    <dimen name="tv_shelf_margin_vertical">6dp</dimen>
+    <dimen name="tv_shelf_card_inset">12dp</dimen>
     <dimen name="tv_missing_artwork_height">72dp</dimen>
     <dimen name="tv_avatar_size">64dp</dimen>
     <dimen name="tv_rating_icon_size">18dp</dimen>

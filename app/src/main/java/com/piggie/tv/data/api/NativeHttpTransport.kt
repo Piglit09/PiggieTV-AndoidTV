@@ -3,7 +3,6 @@ package com.piggie.tv.data.api
 import android.os.SystemClock
 import okhttp3.Call
 import okhttp3.Connection
-import okhttp3.ConnectionPool
 import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.HttpUrl
@@ -18,12 +17,12 @@ import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvNetworkTrace
+import com.piggie.tv.diagnostics.PtvRedactor
 
 /**
  * Cancels only the calls explicitly launched inside one UI/work scope.
@@ -67,10 +66,15 @@ data class SafeNetworkDiagnostic(
     val dnsMs: Long?,
     val connectMs: Long?,
     val tlsMs: Long?,
+    val requestWriteMs: Long? = null,
+    val timeToFirstByteMs: Long? = null,
+    val responseReadMs: Long? = null,
+    val responseBytes: Long? = null,
     val responseStatus: Int?,
     val failurePhase: String?,
     val exceptionClass: String?,
-    val rootCauseClass: String?
+    val rootCauseClass: String?,
+    val debugDelayMs: Long? = null
 ) {
     fun summary(): String {
         val status = responseStatus?.toString() ?: "none"
@@ -82,6 +86,10 @@ data class SafeNetworkDiagnostic(
         "dnsMs=" + (dnsMs ?: 0) +
             " connectMs=" + (connectMs ?: 0) +
             " tlsMs=" + (tlsMs ?: 0) +
+            " requestWriteMs=" + (requestWriteMs ?: 0) +
+            " timeToFirstByteMs=" + (timeToFirstByteMs ?: 0) +
+            " responseReadMs=" + (responseReadMs ?: 0) +
+            " responseBytes=" + (responseBytes ?: 0) +
             " totalMs=" + (totalMs ?: 0) +
             " phase=" + (failurePhase ?: "complete") +
             " exception=" + (exceptionClass ?: "none") +
@@ -101,17 +109,23 @@ private data class CredentialScope(
             port == url.port
 }
 
-class NativeHttpTransport(private val authorization: (String?) -> String) {
+private class RequestTraceHolder {
+    val diagnostic = AtomicReference<SafeNetworkDiagnostic?>(null)
+}
+
+class NativeHttpTransport internal constructor(
+    private val authorization: (String?) -> String,
+    baseClient: OkHttpClient
+) {
+    constructor(authorization: (String?) -> String) : this(
+        authorization,
+        PtvHttpClientOwner.metadataBaseClient
+    )
+
     private val latest = AtomicReference<SafeNetworkDiagnostic?>(null)
+    private val lastForThread = ThreadLocal<SafeNetworkDiagnostic?>()
     private val activeCalls = ConcurrentHashMap.newKeySet<Call>()
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(45, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+    internal val client = baseClient.newBuilder()
         .addNetworkInterceptor { chain ->
             val original = chain.request()
             val scope = original.tag(CredentialScope::class.java)
@@ -135,12 +149,14 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
             SafeTimingListener(
                 call.request().method,
                 sanitize(call.request().url),
-                latest
+                latest,
+                call.request().tag(RequestTraceHolder::class.java)
             )
         }
         .build()
 
     fun latestDiagnostic(): SafeNetworkDiagnostic? = latest.get()
+    fun consumeThreadDiagnostic(): SafeNetworkDiagnostic? = lastForThread.get().also { lastForThread.remove() }
 
     fun execute(
         endpoint: String,
@@ -150,6 +166,50 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         requestScope: NativeRequestScope? = null
     ): String {
         val endpointUrl = requireNotNull(endpoint.toHttpUrlOrNull()) { "Invalid endpoint URL" }
+        val syntheticStarted = SystemClock.elapsedRealtime()
+        var debugDelayMs = 0L
+        try {
+            val synthetic = DebugDiscoveryFaultInjector.beforeRequest(DebugDiscoveryFaultInjector.category(endpoint))
+            debugDelayMs = DebugDiscoveryFaultInjector.consumeAppliedDelayMs() ?: 0L
+            if (synthetic != null) {
+                val diagnostic = SafeNetworkDiagnostic(
+                    method, sanitize(endpointUrl), SystemClock.elapsedRealtime() - syntheticStarted,
+                    null, null, null,
+                    timeToFirstByteMs = 0,
+                    responseReadMs = 0,
+                    responseBytes = synthetic.toByteArray(Charsets.UTF_8).size.toLong(),
+                    responseStatus = 200,
+                    failurePhase = null,
+                    exceptionClass = null,
+                    rootCauseClass = null,
+                    debugDelayMs = debugDelayMs.takeIf { it > 0 }
+                )
+                latest.set(diagnostic)
+                lastForThread.set(diagnostic)
+                return synthetic
+            }
+        } catch (error: Throwable) {
+            debugDelayMs = DebugDiscoveryFaultInjector.consumeAppliedDelayMs() ?: debugDelayMs
+            val diagnostic = SafeNetworkDiagnostic(
+                method, sanitize(endpointUrl), SystemClock.elapsedRealtime() - syntheticStarted,
+                null, null, null,
+                responseStatus = (error as? HttpRequestFailure)?.statusCode,
+                failurePhase = when (error) {
+                    is DebugInjectedDisconnectDuringBodyException -> "response-body"
+                    is DebugInjectedDisconnectBeforeHeadersException -> "connect"
+                    is java.net.SocketTimeoutException -> "call-timeout"
+                    is HttpRequestFailure -> "response-headers"
+                    else -> "debug-fault"
+                },
+                exceptionClass = error::class.java.simpleName,
+                rootCauseClass = rootCause(error)::class.java.simpleName,
+                debugDelayMs = debugDelayMs.takeIf { it > 0 }
+            )
+            latest.set(diagnostic)
+            lastForThread.set(diagnostic)
+            throw error
+        }
+        val traceHolder = RequestTraceHolder()
         val requestBuilder = Request.Builder()
             .url(endpointUrl)
             .header("Accept", "application/json")
@@ -163,11 +223,13 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
                     token
                 )
             )
+            .tag(RequestTraceHolder::class.java, traceHolder)
         if (body != null) {
             requestBuilder.method(method, body.toRequestBody(JSON_MEDIA_TYPE))
         } else {
             requestBuilder.method(method, null)
         }
+        if (requestScope?.isCancelled == true) throw IOException("Request scope was cancelled")
         val call = client.newCall(requestBuilder.build())
         if (requestScope != null && !requestScope.register(call)) {
             call.cancel()
@@ -181,25 +243,35 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
                 responseBody
             }
         } catch (error: Throwable) {
-            val diag = latest.get()
-            if (diag == null || diag.url != endpoint.substringBefore('?')) {
-                latest.set(
-                    SafeNetworkDiagnostic(
-                        method = method,
-                        url = endpoint.substringBefore('?'),
-                        totalMs = SystemClock.elapsedRealtime(), // approximate
-                        dnsMs = null,
-                        connectMs = null,
-                        tlsMs = null,
-                        responseStatus = null,
-                        failurePhase = "early-failure",
-                        exceptionClass = error::class.java.simpleName,
-                        rootCauseClass = rootCause(error)::class.java.simpleName
-                    )
+            if (traceHolder.diagnostic.get() == null) {
+                val diagnostic = SafeNetworkDiagnostic(
+                    method = method,
+                    url = sanitize(endpointUrl),
+                    totalMs = SystemClock.elapsedRealtime() - syntheticStarted,
+                    dnsMs = null,
+                    connectMs = null,
+                    tlsMs = null,
+                    responseStatus = (error as? HttpRequestFailure)?.statusCode,
+                    failurePhase = "early-failure",
+                    exceptionClass = error::class.java.simpleName,
+                    rootCauseClass = rootCause(error)::class.java.simpleName,
+                    debugDelayMs = debugDelayMs.takeIf { it > 0 }
                 )
+                traceHolder.diagnostic.set(diagnostic)
+                latest.set(diagnostic)
             }
             throw error
         } finally {
+            var diagnostic = traceHolder.diagnostic.get()
+            if (diagnostic != null && debugDelayMs > 0 && diagnostic.debugDelayMs == null) {
+                diagnostic = diagnostic.copy(
+                    totalMs = diagnostic.totalMs?.plus(debugDelayMs),
+                    debugDelayMs = debugDelayMs
+                )
+                traceHolder.diagnostic.set(diagnostic)
+                latest.set(diagnostic)
+            }
+            lastForThread.set(diagnostic)
             activeCalls -= call
             requestScope?.unregister(call)
         }
@@ -210,6 +282,15 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
     }
 
     fun download(endpoint: String, token: String?, action: (java.io.InputStream) -> Unit) {
+        download(endpoint, token, null, action)
+    }
+
+    fun download(
+        endpoint: String,
+        token: String?,
+        requestScope: NativeRequestScope?,
+        action: (java.io.InputStream) -> Unit
+    ) {
         val endpointUrl = requireNotNull(endpoint.toHttpUrlOrNull()) { "Invalid endpoint URL" }
         val request = Request.Builder()
             .url(endpointUrl)
@@ -224,27 +305,37 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
                 )
             )
             .build()
+        val call = client.newCall(request)
+        if (requestScope != null && !requestScope.register(call)) {
+            call.cancel()
+            throw IOException("Request scope was cancelled")
+        }
+        activeCalls += call
 
         try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) throw HttpRequestFailure(response.code, response.body?.string().orEmpty())
                 response.body?.byteStream()?.use(action) ?: throw IOException("Empty response body")
             }
         } catch (error: Throwable) {
             // Update diagnostics similarly if needed
             throw error
+        } finally {
+            activeCalls -= call
+            requestScope?.unregister(call)
         }
     }
 
     private class SafeTimingListener(
         private val method: String,
         private val url: String,
-        private val latest: AtomicReference<SafeNetworkDiagnostic?>
+        private val latest: AtomicReference<SafeNetworkDiagnostic?>,
+        private val holder: RequestTraceHolder?
     ) : EventListener() {
         private val startedAtEpochMs = System.currentTimeMillis()
         private val startedAt = SystemClock.elapsedRealtime()
         private val published = AtomicBoolean(false)
-        @Suppress("unused") private val inFlightOrdinal = PtvDiagnosticsManager.networkStarted()
+        private var networkStarted = false
         private var phase = "connect"
         private var dnsStartedAt: Long? = null
         private var dnsDuration: Long? = null
@@ -255,11 +346,18 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         private var status: Int? = null
         private var requestStartedAt: Long? = null
         private var requestWriteDuration: Long? = null
+        private var requestWriteCompletedAt: Long? = null
         private var responseHeadersStartedAt: Long? = null
         private var responseHeadersDuration: Long? = null
         private var firstByteMs: Long? = null
+        private var responseBodyStartedAt: Long? = null
+        private var responseReadDuration: Long? = null
         private var requestBytes: Long? = null
         private var responseBytes: Long? = null
+
+        override fun callStart(call: Call) {
+            networkStarted = PtvDiagnosticsManager.networkStarted() > 0
+        }
 
         override fun dnsStart(call: Call, domainName: String) {
             phase = "dns"
@@ -267,7 +365,7 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         }
 
         override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
-            dnsDuration = elapsed(dnsStartedAt)
+            dnsDuration = (dnsDuration ?: 0L) + (elapsed(dnsStartedAt) ?: 0L)
         }
 
         override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
@@ -281,11 +379,13 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         }
 
         override fun secureConnectEnd(call: Call, handshake: Handshake?) {
-            tlsDuration = elapsed(tlsStartedAt)
+            tlsDuration = (tlsDuration ?: 0L) + (elapsed(tlsStartedAt) ?: 0L)
         }
 
         override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) {
-            connectDuration = elapsed(connectStartedAt)
+            val wholeConnect = elapsed(connectStartedAt) ?: 0L
+            val tcpOnly = (wholeConnect - (tlsDuration ?: 0L)).coerceAtLeast(0L)
+            connectDuration = (connectDuration ?: 0L) + tcpOnly
         }
 
         override fun requestHeadersStart(call: Call) {
@@ -296,12 +396,19 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         override fun requestBodyEnd(call: Call, byteCount: Long) {
             requestBytes = byteCount
             requestWriteDuration = elapsed(requestStartedAt)
+            requestWriteCompletedAt = SystemClock.elapsedRealtime()
+        }
+
+        override fun requestHeadersEnd(call: Call, request: Request) {
+            if (requestWriteDuration == null) requestWriteDuration = elapsed(requestStartedAt)
+            if (requestWriteCompletedAt == null) requestWriteCompletedAt = SystemClock.elapsedRealtime()
         }
 
         override fun responseHeadersStart(call: Call) {
             phase = "read"
             responseHeadersStartedAt = SystemClock.elapsedRealtime()
-            firstByteMs = SystemClock.elapsedRealtime() - startedAt
+            firstByteMs = SystemClock.elapsedRealtime() - (requestWriteCompletedAt ?: startedAt)
+            responseBodyStartedAt = SystemClock.elapsedRealtime()
         }
 
         override fun responseHeadersEnd(call: Call, response: Response) {
@@ -309,8 +416,11 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
             responseHeadersDuration = elapsed(responseHeadersStartedAt)
         }
 
+        override fun responseBodyStart(call: Call) = Unit
+
         override fun responseBodyEnd(call: Call, byteCount: Long) {
             responseBytes = byteCount
+            responseReadDuration = elapsed(responseBodyStartedAt)
         }
 
         override fun callEnd(call: Call) {
@@ -324,21 +434,25 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
         private fun publish(error: Throwable?) {
             if (!published.compareAndSet(false, true)) return
             val total = SystemClock.elapsedRealtime() - startedAt
-            latest.set(
-                SafeNetworkDiagnostic(
+            val diagnostic = SafeNetworkDiagnostic(
                     method = method,
                     url = url,
                     totalMs = total,
                     dnsMs = dnsDuration,
                     connectMs = connectDuration,
                     tlsMs = tlsDuration,
+                    requestWriteMs = requestWriteDuration,
+                    timeToFirstByteMs = firstByteMs,
+                    responseReadMs = responseReadDuration,
+                    responseBytes = responseBytes,
                     responseStatus = status,
                     failurePhase = error?.let { phase },
                     exceptionClass = error?.javaClass?.simpleName,
                     rootCauseClass = error?.let { rootCause(it)::class.java.simpleName }
                 )
-            )
-            PtvDiagnosticsManager.recordNetwork(
+            latest.set(diagnostic)
+            holder?.diagnostic?.set(diagnostic)
+            if (networkStarted) PtvDiagnosticsManager.recordNetwork(
                 PtvNetworkTrace(
                     method = method,
                     endpoint = url,
@@ -365,7 +479,7 @@ class NativeHttpTransport(private val authorization: (String?) -> String) {
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-        fun sanitize(url: HttpUrl): String = url.newBuilder().query(null).build().toString()
+        fun sanitize(url: HttpUrl): String = PtvRedactor.endpoint(url.toString())
 
         fun rootCause(error: Throwable): Throwable {
             var current = error

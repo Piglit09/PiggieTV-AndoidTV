@@ -39,9 +39,13 @@ class ShowsFragment : BaseDiscoveryFragment() {
     }
 
     override fun onDestroyView() {
+        cancelSupplementalHeroCandidates()
+        super.onDestroyView()
+    }
+
+    override fun cancelSupplementalHeroCandidates() {
         heroRequestScope?.cancel()
         heroRequestScope = null
-        super.onDestroyView()
     }
 
     private fun offerReadyCandidates(

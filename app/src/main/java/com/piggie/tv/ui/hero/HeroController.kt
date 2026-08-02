@@ -153,6 +153,11 @@ class HeroController(
         handler.removeCallbacks(focusRunnable)
         pendingFocus = null
         lifecycleResumed = false
+        controlsFocused = false
+        candidateBatches.clear()
+        state = HeroState(route = route)
+        lastVisible = false
+        lastVisibilityScrollSample = Int.MIN_VALUE
     }
 
     private fun rebuildPool() {

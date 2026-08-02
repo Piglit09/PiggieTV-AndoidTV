@@ -31,6 +31,8 @@ import coil.size.Size
 import coil.transform.Transformation
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
+import com.piggie.tv.memory.MemoryPressureParticipant
+import com.piggie.tv.memory.MemoryPressurePolicy
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.models.AudioTrack
@@ -44,6 +46,7 @@ import com.piggie.tv.data.playback.PendingPlaybackPreferences
 import com.piggie.tv.data.playback.SubtitleSelectionMode
 import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvFocusTrace
 import com.piggie.tv.theme.PTVColors
@@ -63,45 +66,50 @@ import com.piggie.tv.util.setTextSizeRes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.properties.ReadWriteProperty
+import kotlin.reflect.KProperty
 
 private object PosterBackdropBlurTransformation : Transformation {
-    override val cacheKey: String = "ptv-details-poster-backdrop-blur-v1"
+    override val cacheKey: String = "ptv-details-poster-backdrop-blur-v2"
 
     override suspend fun transform(input: Bitmap, size: Size): Bitmap {
         val sampledWidth = (input.width / 18).coerceAtLeast(1)
         val sampledHeight = (input.height / 18).coerceAtLeast(1)
-        val sampled = Bitmap.createScaledBitmap(input, sampledWidth, sampledHeight, true)
-        val output = Bitmap.createScaledBitmap(sampled, input.width, input.height, true)
-        if (sampled !== input && sampled !== output) sampled.recycle()
-        return output
+        // ImageView performs the final bilinear scale. Retaining a second full-size bitmap only
+        // to display a deliberately blurred fallback wastes several megabytes on TV hardware.
+        return Bitmap.createScaledBitmap(input, sampledWidth, sampledHeight, true)
     }
 }
 
-class MediaDetailsFragment : Fragment() {
-    private val api by lazy { JellyfinNativeApi(requireContext()) }
-    private val settings by lazy { NativeSettings(requireContext()) }
+class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
+    private val api by lazy { JellyfinNativeApi(requireContext().applicationContext) }
+    private val settings by lazy { NativeSettings(requireContext().applicationContext) }
     private val handler = Handler(Looper.getMainLooper())
     private val apiWorkers = ConcurrentHashMap<Thread, NativeRequestScope>()
     private val apiWorkerKeys = ConcurrentHashMap<String, Thread>()
+    private val clearableViewReferences = mutableListOf<ClearableViewReference<*>>()
+
+    private fun <T : Any> viewReference(): ClearableViewReference<T> =
+        ClearableViewReference<T>().also(clearableViewReferences::add)
 
     private lateinit var session: NativeSession
     private lateinit var features: RendererFeatures
     private lateinit var itemId: String
-    private lateinit var root: FrameLayout
-    private lateinit var scroll: ScrollView
-    private lateinit var sideInfo: LinearLayout
-    private lateinit var infoLeft: LinearLayout
-    private lateinit var brandingRight: FrameLayout
-    private lateinit var logo: ImageView
-    private lateinit var title: TextView
-    private lateinit var metadataContainer: LinearLayout
-    private lateinit var overview: TextView
-    private lateinit var actionsRow: LinearLayout
-    private lateinit var castContainer: LinearLayout
-    private lateinit var seasonsContainer: LinearLayout
-    private lateinit var episodesContainer: LinearLayout
-    private lateinit var relatedContainer: LinearLayout
-    private lateinit var backdrop: ImageView
+    private var root: FrameLayout by viewReference()
+    private var scroll: ScrollView by viewReference()
+    private var sideInfo: LinearLayout by viewReference()
+    private var infoLeft: LinearLayout by viewReference()
+    private var brandingRight: FrameLayout by viewReference()
+    private var logo: ImageView by viewReference()
+    private var title: TextView by viewReference()
+    private var metadataContainer: LinearLayout by viewReference()
+    private var overview: TextView by viewReference()
+    private var actionsRow: LinearLayout by viewReference()
+    private var castContainer: LinearLayout by viewReference()
+    private var seasonsContainer: LinearLayout by viewReference()
+    private var episodesContainer: LinearLayout by viewReference()
+    private var relatedContainer: LinearLayout by viewReference()
+    private var backdrop: ImageView by viewReference()
 
     private var currentItem: MediaItem? = null
     private var nextUpItem: MediaItem? = null
@@ -111,7 +119,7 @@ class MediaDetailsFragment : Fragment() {
     private var relatedList: RecyclerView? = null
     private var primaryAction: View? = null
     private var tracksReady = false
-    private var destroyed = false
+    private var destroyed = true
     private var requestGeneration = 0
     private var interactiveReported = false
     private val traceCookie = TRACE_SEQUENCE.incrementAndGet()
@@ -125,7 +133,7 @@ class MediaDetailsFragment : Fragment() {
     private var pendingActionSeasonFocus = false
 
     private data class DetailsStackEntry(
-        val item: MediaItem,
+        val itemId: String,
         val scrollY: Int,
         val focusedItemId: String?,
         val seasonId: String?,
@@ -134,7 +142,13 @@ class MediaDetailsFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        itemId = requireArguments().getString(ARG_ITEM_ID).orEmpty()
+        itemId = savedInstanceState?.getString(STATE_ITEM_ID)
+            ?: requireArguments().getString(ARG_ITEM_ID).orEmpty()
+        savedInstanceState?.getStringArrayList(STATE_STACK_ITEM_IDS)?.forEach { savedItemId ->
+            detailsStack.addLast(
+                DetailsStackEntry(savedItemId, 0, null, null, tracksReady = false)
+            )
+        }
         session = (activity as? PtvHostActivity)?.session
             ?: SecureSessionStore(requireContext()).read()
             ?: error("No active session")
@@ -193,6 +207,11 @@ class MediaDetailsFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View {
         destroyed = false
+        interactiveReported = false
+        tracksReady = false
+        seasonsSettled = true
+        episodesSettled = true
+        relatedSettled = true
         buildLayout()
         val seed = MediaDetailsSeedStore.getItem(itemId)
         if (seed != null) {
@@ -204,6 +223,76 @@ class MediaDetailsFragment : Fragment() {
         }
         loadDetails(itemId)
         return root
+    }
+
+    override fun onDestroyView() {
+        destroyed = true
+        requestGeneration++
+        handler.removeCallbacksAndMessages(null)
+        cancelAllApiWork()
+        endContentTrace()
+
+        releaseViewTree(root)
+        root.removeAllViews()
+        seasonList = null
+        episodeList = null
+        relatedList = null
+        primaryAction = null
+        currentItem = null
+        nextUpItem = null
+        currentSeasonId = null
+        pendingRestore = null
+        pendingEpisodeFocusSeasonId = null
+        pendingActionSeasonFocus = false
+        clearableViewReferences.forEach(ClearableViewReference<*>::clear)
+        super.onDestroyView()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_ITEM_ID, itemId)
+        outState.putStringArrayList(
+            STATE_STACK_ITEM_IDS,
+            ArrayList(detailsStack.map(DetailsStackEntry::itemId))
+        )
+    }
+
+    override fun onMemoryPressure(level: Int) {
+        val actions = MemoryPressurePolicy.actions(level)
+        if (!actions.releaseCurrentScreenContent || destroyed || view == null) return
+        handler.removeCallbacksAndMessages(BACKDROP_HANDLER_TOKEN)
+        cancelApiWork(WORK_RELATED)
+        cancelApiWork(WORK_SEASONS)
+        cancelApiWork(WORK_EPISODES)
+        backdrop.dispose()
+        backdrop.setImageDrawable(null)
+        logo.dispose()
+        logo.setImageDrawable(null)
+        seasonList?.recycledViewPool?.clear()
+        episodeList?.recycledViewPool?.clear()
+        relatedList?.recycledViewPool?.clear()
+    }
+
+    private fun releaseViewTree(view: View) {
+        if (view is ViewGroup) {
+            for (index in view.childCount - 1 downTo 0) {
+                releaseViewTree(view.getChildAt(index))
+            }
+        }
+        when (view) {
+            is RecyclerView -> {
+                view.adapter = null
+                view.layoutManager = null
+                view.recycledViewPool.clear()
+            }
+            is ImageView -> {
+                view.dispose()
+                view.setImageDrawable(null)
+            }
+        }
+        view.setOnClickListener(null)
+        view.onFocusChangeListener = null
+        view.setOnKeyListener(null)
     }
 
     private fun buildLayout() {
@@ -352,6 +441,7 @@ class MediaDetailsFragment : Fragment() {
                 activity?.runOnUiThread {
                     if (!isCurrentRequest(generation, item.id)) return@runOnUiThread
                     val updated = (currentItem ?: item).copy(
+                        mediaSourceId = playbackInfo.mediaSourceId,
                         audioTracks = playbackInfo.audioTracks,
                         subtitleTracks = playbackInfo.subtitleTracks
                     )
@@ -476,9 +566,22 @@ class MediaDetailsFragment : Fragment() {
         }
         val candidate = candidates[index]
         target.load(artworkUrl(candidate)) {
-            crossfade(500)
+            crossfade(features.transitions)
             placeholder(ColorDrawable(if (target === backdrop) PTVColors.background else PTVColors.cardBackground))
-            if (target.width > 0 && target.height > 0) size(target.width, target.height)
+            if (target === backdrop) {
+                size(DETAILS_BACKDROP_WIDTH, DETAILS_BACKDROP_HEIGHT)
+            } else {
+                size(DETAILS_LOGO_WIDTH, DETAILS_LOGO_HEIGHT)
+            }
+            setParameter(
+                PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                if (target === backdrop) {
+                    PtvCoilEventListenerFactory.CATEGORY_DETAILS_BACKDROP
+                } else {
+                    PtvCoilEventListenerFactory.CATEGORY_DETAILS_LOGO
+                },
+                null
+            )
             allowRgb565(features.rgb565Posters && target !== backdrop)
             if (target === backdrop && candidate.blurred) {
                 transformations(PosterBackdropBlurTransformation)
@@ -556,10 +659,14 @@ class MediaDetailsFragment : Fragment() {
             }
         }
         if (restoreDescription != null || restoreIndex != null) {
-            actionsRow.post {
+            // Capture the concrete row. A fast Details close can destroy the fragment view before
+            // this focus callback runs; touching the clearable actionsRow property then crashes.
+            val row = actionsRow
+            row.post {
+                if (destroyed || !row.isAttachedToWindow) return@post
                 val target = restoreDescription?.let { description ->
-                    actionsRow.children().firstOrNull { it.contentDescription == description }
-                } ?: restoreIndex?.takeIf { it in 0 until actionsRow.childCount }?.let(actionsRow::getChildAt)
+                    row.children().firstOrNull { it.contentDescription == description }
+                } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
                 target?.requestFocus()
             }
         } else if (currentItem != null && root.findFocus() == null) {
@@ -630,7 +737,17 @@ class MediaDetailsFragment : Fragment() {
 
     private fun showAudioSelection(item: MediaItem, opener: View) {
         val options = listOf("Default / Auto") + item.audioTracks.map(::audioTrackLabel)
-        PtvSelectionDialog(requireContext(), "Audio", options, restoreFocusTo = opener) { index ->
+        val selectedIndex = PendingPlaybackPreferences.get(item.id).audioIndex?.let { selected ->
+            item.audioTracks.indexOfFirst { it.index == selected }.takeIf { it >= 0 }?.plus(1)
+        } ?: 0
+        PtvSelectionDialog(
+            requireContext(),
+            "Audio",
+            options,
+            selectedIndex = selectedIndex,
+            defaultIndex = 0,
+            restoreFocusTo = opener
+        ) { index ->
             PendingPlaybackPreferences.setAudio(item.id, if (index == 0) null else item.audioTracks[index - 1].index)
             rerenderActionsPreservingFocus(currentItem ?: item)
         }.show()
@@ -638,7 +755,24 @@ class MediaDetailsFragment : Fragment() {
 
     private fun showSubtitleSelection(item: MediaItem, opener: View) {
         val options = listOf("Default / Auto", "Off") + item.subtitleTracks.map(::subtitleTrackLabel)
-        PtvSelectionDialog(requireContext(), "Subtitles", options, restoreFocusTo = opener) { index ->
+        val preference = PendingPlaybackPreferences.get(item.id)
+        val selectedIndex = when (preference.subtitleMode) {
+            SubtitleSelectionMode.DEFAULT -> 0
+            SubtitleSelectionMode.OFF -> 1
+            SubtitleSelectionMode.TRACK -> item.subtitleTracks
+                .indexOfFirst { it.index == preference.subtitleIndex }
+                .takeIf { it >= 0 }
+                ?.plus(2)
+                ?: 0
+        }
+        PtvSelectionDialog(
+            requireContext(),
+            "Subtitles",
+            options,
+            selectedIndex = selectedIndex,
+            defaultIndex = 0,
+            restoreFocusTo = opener
+        ) { index ->
             when (index) {
                 0 -> PendingPlaybackPreferences.setSubtitle(item.id, SubtitleSelectionMode.DEFAULT)
                 1 -> PendingPlaybackPreferences.setSubtitle(item.id, SubtitleSelectionMode.OFF)
@@ -670,6 +804,9 @@ class MediaDetailsFragment : Fragment() {
     }.joinToString(" · ")
 
     private fun startPlayback(item: MediaItem) {
+        // Reuse the fully loaded Details item in the player. Besides avoiding a redundant request,
+        // this preserves the exact MediaSourceId that owns the displayed stream indices.
+        MediaDetailsSeedStore.put(item)
         VideoPlayerActivity.start(requireContext(), item.id, item.playbackPositionTicks, PendingPlaybackPreferences.get(item.id))
     }
 
@@ -682,7 +819,11 @@ class MediaDetailsFragment : Fragment() {
                         api.loadEpisodes(session, series.id, s.id).firstOrNull()
                     }
             }.getOrNull()
-            activity?.runOnUiThread { if (episode != null) startPlayback(episode) }
+            activity?.runOnUiThread {
+                if (episode != null && isAdded && !destroyed && currentItem?.id == series.id) {
+                    startPlayback(episode)
+                }
+            }
         }
     }
 
@@ -713,10 +854,12 @@ class MediaDetailsFragment : Fragment() {
                 else api.setPlayed(session, item.id, !item.isPlayed)
             }
             activity?.runOnUiThread {
-                result.onSuccess {
-                    val updated = (currentItem ?: item).let { if (favorite) it.copy(isFavorite = !item.isFavorite) else it.copy(isPlayed = !item.isPlayed) }
-                    currentItem = updated
-                    rerenderActionsPreservingFocus(updated)
+                if (isAdded && !destroyed && currentItem?.id == item.id) {
+                    result.onSuccess {
+                        val updated = (currentItem ?: item).let { if (favorite) it.copy(isFavorite = !item.isFavorite) else it.copy(isPlayed = !item.isPlayed) }
+                        currentItem = updated
+                        rerenderActionsPreservingFocus(updated)
+                    }
                 }
             }
         }
@@ -883,6 +1026,12 @@ class MediaDetailsFragment : Fragment() {
             MediaCardFactory.bindView(holder, season, MediaCardPresentation.POSTER, session, api)
             holder.itemView.setOnClickListener { selectSeason(series, season, generation, true) }
         }
+
+        override fun onViewRecycled(holder: MediaCardHolder) {
+            MediaCardFactory.recycleView(holder)
+            holder.itemView.setOnClickListener(null)
+            super.onViewRecycled(holder)
+        }
     }
 
     private inner class EpisodeAdapter(private val episodes: List<MediaItem>) : RecyclerView.Adapter<MediaCardHolder>() {
@@ -894,6 +1043,12 @@ class MediaDetailsFragment : Fragment() {
             MediaCardFactory.bindView(holder, ep, MediaCardPresentation.LANDSCAPE, session, api)
             holder.itemView.setOnClickListener { openNestedDetails(ep) }
         }
+
+        override fun onViewRecycled(holder: MediaCardHolder) {
+            MediaCardFactory.recycleView(holder)
+            holder.itemView.setOnClickListener(null)
+            super.onViewRecycled(holder)
+        }
     }
 
     private inner class RelatedAdapter(private val items: List<MediaItem>) : RecyclerView.Adapter<MediaCardHolder>() {
@@ -904,6 +1059,12 @@ class MediaDetailsFragment : Fragment() {
             val item = items[position]
             MediaCardFactory.bindView(holder, item, MediaCardPresentation.POSTER, session, api)
             holder.itemView.setOnClickListener { openNestedDetails(item) }
+        }
+
+        override fun onViewRecycled(holder: MediaCardHolder) {
+            MediaCardFactory.recycleView(holder)
+            holder.itemView.setOnClickListener(null)
+            super.onViewRecycled(holder)
         }
     }
 
@@ -930,6 +1091,13 @@ class MediaDetailsFragment : Fragment() {
             holder.avatar.load("${session.serverUrl}/Items/${p.id}/Images/Primary?maxWidth=200") {
                 placeholder(ColorDrawable(PTVColors.cardBackground))
                 transformations(coil.transform.CircleCropTransformation())
+                val avatarSize = requireContext().dim(R.dimen.tv_avatar_size)
+                size(avatarSize, avatarSize)
+                setParameter(
+                    PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                    PtvCoilEventListenerFactory.CATEGORY_DETAILS_PERSON,
+                    null
+                )
             }
         }
         inner class Holder(view: View, val avatar: ImageView, val name: TextView, val role: TextView) : RecyclerView.ViewHolder(view)
@@ -937,9 +1105,10 @@ class MediaDetailsFragment : Fragment() {
 
     private fun openNestedDetails(item: MediaItem) {
         currentItem?.let {
+            MediaDetailsSeedStore.put(it)
             detailsStack.addLast(
                 DetailsStackEntry(
-                    item = it,
+                    itemId = it.id,
                     scrollY = scroll.scrollY,
                     focusedItemId = activity?.currentFocus?.tag as? String,
                     seasonId = currentSeasonId,
@@ -954,15 +1123,33 @@ class MediaDetailsFragment : Fragment() {
     /** Called by the host before it removes the details surface. */
     fun handleBackWithinDetails(): Boolean {
         val previous = detailsStack.pollLast() ?: return false
-        switchItem(previous.item, true)
+        val seed = MediaDetailsSeedStore.getItem(previous.itemId)
+        if (seed != null) {
+            switchItem(seed, true)
+        } else {
+            switchItem(previous.itemId)
+        }
         scroll.post { scroll.scrollTo(0, previous.scrollY) }
         return true
+    }
+
+    private fun switchItem(restoredItemId: String) {
+        cancelAllApiWork()
+        requestGeneration++
+        itemId = restoredItemId
+        requireArguments().putString(ARG_ITEM_ID, restoredItemId)
+        currentItem = null
+        nextUpItem = null
+        renderLoadingIdentity()
+        scroll.scrollTo(0, 0)
+        loadDetails(restoredItemId)
     }
 
     private fun switchItem(item: MediaItem, fullDetails: Boolean) {
         cancelAllApiWork()
         requestGeneration++
         itemId = item.id
+        requireArguments().putString(ARG_ITEM_ID, item.id)
         currentItem = item
         nextUpItem = null
         markSecondaryUnresolved(item)
@@ -975,7 +1162,17 @@ class MediaDetailsFragment : Fragment() {
         if (interactiveReported) return
         interactiveReported = true
         root.postOnAnimation {
-            if (isAdded && !destroyed) (activity as? PtvHostActivity)?.onDetailsInteractive(SystemClock.elapsedRealtime())
+            if (isAdded && !destroyed) {
+                (activity as? PtvHostActivity)?.onDetailsInteractive(SystemClock.elapsedRealtime())
+                endContentTrace()
+            }
+        }
+    }
+
+    private fun endContentTrace() {
+        if (traceStarted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Trace.endAsyncSection("PiggieTV#details:content", traceCookie)
+            traceStarted = false
         }
     }
 
@@ -997,9 +1194,30 @@ class MediaDetailsFragment : Fragment() {
 
     private fun topMargin(@DimenRes top: Int) = LinearLayout.LayoutParams(-1, -2).apply { topMargin = requireContext().dim(top) }
 
+    private class ClearableViewReference<T : Any> : ReadWriteProperty<Any?, T> {
+        private var value: T? = null
+
+        override fun getValue(thisRef: Any?, property: KProperty<*>): T =
+            checkNotNull(value) { "${property.name} accessed outside the details view lifecycle" }
+
+        override fun setValue(thisRef: Any?, property: KProperty<*>, value: T) {
+            this.value = value
+        }
+
+        fun clear() {
+            value = null
+        }
+    }
+
     companion object {
         private const val ARG_ITEM_ID = "item_id"
+        private const val STATE_ITEM_ID = "state_item_id"
+        private const val STATE_STACK_ITEM_IDS = "state_stack_item_ids"
         private const val DETAILS_BACKDROP_DELAY_MS = 450L
+        private const val DETAILS_BACKDROP_WIDTH = 1280
+        private const val DETAILS_BACKDROP_HEIGHT = 720
+        private const val DETAILS_LOGO_WIDTH = 400
+        private const val DETAILS_LOGO_HEIGHT = 240
         private const val AUDIO_DESCRIPTION = "Choose audio track"
         private const val SUBTITLE_DESCRIPTION = "Choose subtitle track"
         private const val SPEED_DESCRIPTION = "Choose connection speed"

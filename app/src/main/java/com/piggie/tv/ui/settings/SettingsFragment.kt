@@ -34,12 +34,15 @@ import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvTestResult
 import com.piggie.tv.diagnostics.PtvTestRunner
 import com.piggie.tv.theme.PTVShapes
+import com.piggie.tv.ui.player.MediaDetailsSeedStore
+import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.widgets.PtvSelectionDialog
 import com.piggie.tv.util.CrashReporter
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import com.piggie.tv.util.sp
 
+@OptIn(ExperimentalCoilApi::class)
 class SettingsFragment : Fragment() {
     private val api by lazy { JellyfinNativeApi(requireContext()) }
     private val store by lazy { SecureSessionStore(requireContext()) }
@@ -47,7 +50,6 @@ class SettingsFragment : Fragment() {
     private lateinit var session: NativeSession
     private lateinit var root: FrameLayout
 
-    @OptIn(ExperimentalCoilApi::class)
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         session = (activity as? PtvHostActivity)?.session ?: store.read()!!
         root = FrameLayout(requireContext())
@@ -63,7 +65,14 @@ class SettingsFragment : Fragment() {
             orientation = LinearLayout.VERTICAL
             setPadding(context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_medium), context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_large))
         }
-        scroll.addView(page)
+        scroll.addView(
+            page,
+            FrameLayout.LayoutParams(
+                context.dim(R.dimen.tv_settings_content_width),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER_HORIZONTAL
+            )
+        )
         
         page.addView(label("Settings", context.sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true))
         page.addView(label("v0.8.6-beta.1  •  ${session.userName}", context.sp(R.dimen.tv_text_size_body), R.color.tv_text_secondary, margin = 8))
@@ -91,6 +100,8 @@ class SettingsFragment : Fragment() {
             showDiagnostics()
         }
         settingsButton(page, "Sign Out") {
+            DiscoveryManager.clearForLogout()
+            MediaDetailsSeedStore.clear()
             store.clear()
             activity?.finish()
         }
@@ -133,6 +144,7 @@ class SettingsFragment : Fragment() {
         val context = requireContext()
         PtvDiagnosticsManager.initialize(context)
         val device = PtvDeviceSnapshot.capture(context)
+        val rendering = TvRenderingRuntime.capabilitySnapshot()
 
         val scroll = ScrollView(context).apply { isFillViewport = true }
         scroll.isSmoothScrollingEnabled = false
@@ -152,6 +164,9 @@ class SettingsFragment : Fragment() {
             "Density: ${device.density} • ${device.densityDpi}dpi • scaled ${device.scaledDensity} • font ${device.fontScale}",
             "Display mode: ${device.displayMode} @ ${"%.2f".format(device.refreshRateHz)}Hz",
             "Memory: ${device.availableMemoryBytes / 1024 / 1024}MB available • Storage: ${device.availableStorageBytes / 1024 / 1024}MB available",
+            "Rendering: ${rendering.renderingProfile} / ${rendering.renderingExperiment} • levels ${rendering.visualFeatureLevels.joinToString(" + ").ifEmpty { "FLAT" }}",
+            "Static glass: ${rendering.staticGlassEnabled} • shelf glass: ${rendering.shelfGlassEnabled} • ice cards: ${rendering.iceCardEnabled} • progress gradient: ${rendering.progressGradientEnabled}",
+            "Animated effects: ${rendering.animatedEffectsEnabled} • focus scale: ${rendering.focusScale} • focus elevation: ${rendering.focusElevation} • blur: ${rendering.blurEnabled}",
             "Diagnostics: ${if (PtvDiagnosticsManager.isEnabled()) "Enabled" else "Disabled"} • Overlay: ${if (PerformanceMonitor.isVisible()) "Visible" else "Hidden"}"
         )
         lines.forEach { page.addView(label(it, context.sp(R.dimen.tv_text_size_body), R.color.tv_text_secondary, margin = context.dim(R.dimen.tv_spacing_small))) }
@@ -165,7 +180,49 @@ class SettingsFragment : Fragment() {
                 margin = context.dim(R.dimen.tv_spacing_medium)
             )
         )
-        val shelfDiagnostics = DiscoveryManager.recentDiagnostics()
+        if (com.piggie.tv.BuildConfig.DEBUG) {
+            val fault = com.piggie.tv.data.api.DebugDiscoveryFaultInjector.snapshot()
+            page.addView(
+                label(
+                    "Debug discovery fault: category=${fault.category ?: "none"} shelf=${fault.shelfId ?: "any"} mode=${fault.mode} " +
+                        "refreshBypass=${fault.refreshBypass} " +
+                        "attempts=${fault.attempts} applied=${fault.applied}",
+                    context.sp(R.dimen.tv_text_size_metadata),
+                    R.color.tv_text_secondary
+                )
+            )
+        }
+        val homePage = com.piggie.tv.data.discovery.DiscoveryPage.HOME
+        val discoverySnapshot = DiscoveryManager.currentPageDiagnostics(homePage)
+        val shelfDiagnostics = discoverySnapshot.shelves
+        val aggregate = discoverySnapshot.aggregate
+        val separator = " ${com.piggie.tv.data.discovery.DiscoveryDiagnostics.SEPARATOR} "
+        val cacheStats = DiscoveryManager.cacheStats()
+        val imageCache = Coil.imageLoader(context).memoryCache
+        val imageCacheBytes = imageCache?.size ?: 0L
+        val runtimeStats = PtvDiagnosticsManager.runtimeStats()
+        page.addView(
+            label(
+                "Discovery memory: cache=${cacheStats.entries} entries/${cacheStats.estimatedBytes} bytes " +
+                    "imageCache=$imageCacheBytes bytes " +
+                    "inFlight=${cacheStats.inFlight} activeLoads=${DiscoveryManager.activeShelfLoadCount()} " +
+                    "adapterCards=${aggregate.renderedCards} fragments=${parentFragmentManager.fragments.size} " +
+                    "activeHttp=${runtimeStats.networkInFlight} activeImages=${runtimeStats.imageInFlight} " +
+                    "bitmapEstimate=${runtimeStats.bitmapBytesEstimate} bytes activities=${runtimeStats.activityCount} " +
+                    "diagnosticSamples=${DiscoveryManager.diagnosticSampleCount()}/128 " +
+                    "traceSamples=${runtimeStats.traceSamples}/1080 events=${runtimeStats.eventSamples}/250 " +
+                    "persistence=MEMORY_ONLY",
+                context.sp(R.dimen.tv_text_size_metadata),
+                R.color.tv_text_secondary
+            )
+        )
+        page.addView(
+            label(
+                "Home manifest: ${com.piggie.tv.data.discovery.DiscoveryDiagnostics.formatManifest(aggregate)}",
+                context.sp(R.dimen.tv_text_size_metadata),
+                R.color.tv_text_secondary
+            )
+        )
         if (shelfDiagnostics.isEmpty()) {
             page.addView(label("No shelf samples recorded yet.", context.sp(R.dimen.tv_text_size_metadata), R.color.tv_text_secondary))
         } else {
@@ -173,9 +230,22 @@ class SettingsFragment : Fragment() {
                 val cache = if (shelf.cacheHit) "hit" else "miss"
                 page.addView(
                     label(
-                        "${shelf.page}/${shelf.shelfTitle}: ${shelf.status} • " +
-                            "${shelf.resultCount}→${shelf.renderCount} • ${shelf.elapsedMs}ms • " +
-                            "HTTP ${shelf.httpStatus ?: "—"} • cache $cache • visible ${shelf.visibleCards ?: 0}",
+                        "${shelf.page}/${shelf.shelfTitle} [${shelf.shelfId}]: ${shelf.finalState}$separator" +
+                            "${com.piggie.tv.data.discovery.DiscoveryDiagnostics.formatCounts(shelf)}$separator" +
+                            "total=${shelf.elapsedMs}ms queue=${shelf.queueWaitMs ?: -1}ms " +
+                            "dns=${shelf.dnsMs ?: -1}ms connect=${shelf.connectMs ?: -1}ms tls=${shelf.tlsMs ?: -1}ms " +
+                            "write=${shelf.requestWriteMs ?: -1}ms ttfb=${shelf.timeToFirstByteMs ?: -1}ms " +
+                            "read=${shelf.responseReadMs ?: -1}ms parse=${shelf.parseMs ?: -1}ms " +
+                            "filter=${shelf.filteringMs ?: -1}ms score=${shelf.scoringMs ?: -1}ms " +
+                            "dedupe=${shelf.dedupeMs ?: -1}ms adapterBuild=${shelf.adapterBuildMs ?: -1}ms " +
+                            "faultDelay=${shelf.faultInjectionDelayMs ?: -1}ms " +
+                            "firstSubmit=${shelf.firstCardSubmitMs ?: -1}ms firstPoster=${shelf.firstPosterMs ?: -1}ms " +
+                            "bytes=${shelf.responseBytes ?: -1}$separator" +
+                            "HTTP ${shelf.httpStatus ?: "-"} cache=$cache age=${shelf.cacheAgeMs ?: -1}ms " +
+                            "ttl=${shelf.cacheTtlRemainingMs ?: -1}ms entryBytes=${shelf.cacheEntryBytes ?: -1} " +
+                            "category=${shelf.cacheKeyCategory ?: "-"} source=${shelf.cacheSourceShelfId ?: "-"} " +
+                            "coalesced=${shelf.inFlightCoalesced} refreshBypass=${shelf.cacheRefreshBypassed} " +
+                            "avoided=${shelf.requestAvoided}",
                         context.sp(R.dimen.tv_text_size_metadata),
                         R.color.tv_text_secondary,
                         margin = context.dim(R.dimen.tv_spacing_small)

@@ -40,6 +40,7 @@ android {
             versionNameSuffix = "-debug"
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "true")
+            buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "true")
         }
         create("beta") {
             initWith(getByName("release"))
@@ -48,6 +49,7 @@ android {
             signingConfig = signingConfigs.getByName("beta")
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
+            buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
             isDebuggable = false
         }
         release {
@@ -59,6 +61,7 @@ android {
             signingConfig = signingConfigs.getByName("beta")
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "false")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
+            buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
         }
     }
 
@@ -110,6 +113,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }

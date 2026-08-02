@@ -3,9 +3,11 @@ package com.piggie.tv.ui.hero
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.os.SystemClock
+import android.util.Log
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -14,16 +16,21 @@ import android.widget.TextView
 import coil.dispose
 import coil.imageLoader
 import coil.load
+import coil.memory.MemoryCache
 import coil.request.Disposable
 import coil.request.ImageRequest
 import com.piggie.tv.R
+import com.piggie.tv.BuildConfig
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvRedactor
 import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
+import com.piggie.tv.ui.rendering.TvRenderingProfile
+import com.piggie.tv.ui.layout.TvLayoutProfileResolver
 import com.piggie.tv.ui.shared.TextSanitizer
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
@@ -74,13 +81,18 @@ class HeroRowView(
     }
     private val primary = heroButton(primary = true)
     private val details = heroButton(primary = false).apply { text = "Details" }
+    private lateinit var content: LinearLayout
+    private lateinit var actions: LinearLayout
     private var current: HeroCandidate? = null
     private var lastState: HeroState? = null
     private var preloadDisposable: Disposable? = null
     private var renderedBackdropKey: String? = null
+    private var activeBackdropCacheKeys = emptyList<String>()
     private var backdropRequestGeneration = 0L
     private var renderedLogoKey: String? = null
+    private var activeLogoCacheKey: String? = null
     private var preloadedBackdropKey: String? = null
+    private var lastMeasurementSignature: String? = null
 
     init {
         id = R.id.hero_row
@@ -88,7 +100,7 @@ class HeroRowView(
         addView(backdrop, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(overlay, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        val content = LinearLayout(context).apply {
+        content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.START
             setPadding(
@@ -120,7 +132,7 @@ class HeroRowView(
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = context.dim(R.dimen.tv_spacing_medium) }
         )
-        val actions = LinearLayout(context).apply {
+        actions = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, context.dim(R.dimen.tv_spacing_medium), 0, 0)
             addView(
@@ -151,25 +163,64 @@ class HeroRowView(
         render(null)
     }
 
+    /** Debug-only physical-layout evidence; contains geometry only, never media identifiers. */
+    fun traceMeasurement(row: View = this) {
+        if (!BuildConfig.DEBUG) return
+        val density = resources.displayMetrics.density
+        fun bounds(view: View): String {
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+            return "${location[0]},${location[1]},${location[0] + view.width},${location[1] + view.height}"
+        }
+        val params = row.layoutParams as? ViewGroup.MarginLayoutParams
+        val expectedPx = resources.getDimensionPixelSize(R.dimen.tv_hero_height)
+        val (profile, viewport) = TvLayoutProfileResolver.from(context)
+        val rowBounds = bounds(row)
+        val heroBounds = bounds(this)
+        val imageBounds = bounds(backdrop)
+        val contentBounds = bounds(content)
+        val primaryBounds = bounds(primary)
+        val detailsBounds = bounds(details)
+        val signature = listOf(
+            rowBounds,
+            heroBounds,
+            imageBounds,
+            contentBounds,
+            primaryBounds,
+            detailsBounds,
+            logo.visibility,
+            title.visibility,
+            overview.lineCount
+        ).joinToString(":")
+        if (signature == lastMeasurementSignature) return
+        lastMeasurementSignature = signature
+        Log.i(
+            "HeroMeasurement",
+            "expectedPx=$expectedPx expectedDp=${expectedPx / density} measuredPx=${row.height} measuredDp=${row.height / density} " +
+                "rowBounds=$rowBounds heroBounds=$heroBounds imageBounds=$imageBounds contentBounds=$contentBounds " +
+                "primaryBounds=$primaryBounds detailsBounds=$detailsBounds " +
+                "marginsPx=${params?.leftMargin ?: 0},${params?.topMargin ?: 0}," +
+                "${params?.rightMargin ?: 0},${params?.bottomMargin ?: 0} " +
+                "paddingPx=${row.paddingLeft},${row.paddingTop},${row.paddingRight},${row.paddingBottom} " +
+                "resource=${resources.getResourceName(R.dimen.tv_hero_height)} density=$density " +
+                "sw=${viewport.smallestWidthDp} profile=$profile"
+        )
+    }
+
     fun render(state: HeroState?) {
         lastState = state
         val candidate = state?.current
         current = candidate
         if (candidate == null) {
-            invalidateBackdropRequest()
-            applyTerminalBackdrop()
-            logo.dispose()
+            releaseArtwork()
+            if (canLoadArtwork()) applyTerminalBackdrop()
             logo.visibility = View.GONE
             title.visibility = View.VISIBLE
-            title.text = ""
-            metadata.text = ""
+            title.text = "PiggieTV"
+            metadata.text = "Featured content is still loading"
             overview.text = ""
             primary.visibility = View.INVISIBLE
             details.visibility = View.INVISIBLE
-            preloadDisposable?.dispose()
-            preloadDisposable = null
-            renderedLogoKey = null
-            preloadedBackdropKey = null
             return
         }
 
@@ -181,15 +232,32 @@ class HeroRowView(
         } else {
             candidate.item.title
         }
+        metadata.text = metadata(candidate.item)
+        overview.text = TextSanitizer.sanitize(candidate.item.overview)
+        if (!canLoadArtwork()) {
+            releaseArtwork()
+            logo.visibility = View.GONE
+            title.visibility = View.VISIBLE
+            title.text = titleFallback
+            return
+        }
         val artwork = candidate.artworkItem
         if (!artwork.logoTag.isNullOrBlank()) {
             title.visibility = View.GONE
             logo.visibility = View.VISIBLE
             val logoKey = "${artwork.id}:${artwork.logoTag}"
             if (renderedLogoKey != logoKey) {
+                evictActiveLogoFromMemoryCache()
                 renderedLogoKey = logoKey
+                activeLogoCacheKey = "ptv-hero-logo:$logoKey"
                 logo.load(api.logoUrl(session, artwork)) {
                     crossfade(false)
+                    memoryCacheKey(requireNotNull(activeLogoCacheKey))
+                    setParameter(
+                        PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                        PtvCoilEventListenerFactory.CATEGORY_HERO,
+                        null
+                    )
                     size(
                         context.dim(R.dimen.tv_hero_logo_max_width),
                         context.dim(R.dimen.tv_hero_logo_max_height)
@@ -198,31 +266,30 @@ class HeroRowView(
             }
         } else {
             logo.dispose()
+            evictActiveLogoFromMemoryCache()
             renderedLogoKey = null
             logo.visibility = View.GONE
             title.visibility = View.VISIBLE
             title.text = titleFallback
         }
 
-        metadata.text = metadata(candidate.item)
-        overview.text = TextSanitizer.sanitize(candidate.item.overview)
         loadBackdrop(candidate)
         preload(state.next)
     }
 
     override fun onDetachedFromWindow() {
-        invalidateBackdropRequest()
-        logo.dispose()
-        preloadDisposable?.dispose()
-        preloadDisposable = null
-        renderedLogoKey = null
-        preloadedBackdropKey = null
+        releaseArtwork()
         super.onDetachedFromWindow()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         render(lastState)
+    }
+
+    override fun onVisibilityAggregated(isVisible: Boolean) {
+        super.onVisibilityAggregated(isVisible)
+        if (isVisible) render(lastState) else releaseArtwork()
     }
 
     private fun loadBackdrop(candidate: HeroCandidate) {
@@ -232,8 +299,10 @@ class HeroRowView(
             requests.map(HeroArtworkRequest::cacheKey)
         )
         if (renderedBackdropKey == backdropKey) return
+        evictActiveBackdropFromMemoryCache()
         backdropRequestGeneration += 1L
         renderedBackdropKey = backdropKey
+        activeBackdropCacheKeys = requests.map(HeroArtworkRequest::cacheKey)
         val generation = backdropRequestGeneration
         // Invalidate the ImageView target before beginning a richer replacement chain for the
         // same playable episode. Callback ownership below protects against late cancellation.
@@ -280,6 +349,11 @@ class HeroRowView(
             placeholder(backdrop.drawable ?: ColorDrawable(PTVColors.background))
             size(HERO_IMAGE_WIDTH, HERO_IMAGE_HEIGHT)
             memoryCacheKey(request.cacheKey)
+            setParameter(
+                PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                PtvCoilEventListenerFactory.CATEGORY_HERO,
+                null
+            )
             listener(
                 onSuccess = { _, _ ->
                     if (ownsBackdropCallback(candidate, backdropKey, generation)) {
@@ -337,7 +411,53 @@ class HeroRowView(
         backdrop.dispose()
     }
 
+    private fun releaseArtwork() {
+        invalidateBackdropRequest()
+        backdrop.setImageDrawable(null)
+        logo.dispose()
+        logo.setImageDrawable(null)
+        preloadDisposable?.dispose()
+        preloadDisposable = null
+        renderedLogoKey = null
+        preloadedBackdropKey = null
+        evictActiveBackdropFromMemoryCache()
+        evictActiveLogoFromMemoryCache()
+    }
+
+    /** Drops optional artwork immediately when the host receives a critical memory signal. */
+    fun releaseForMemoryPressure() {
+        lastState = null
+        current = null
+        releaseArtwork()
+    }
+
+    private fun evictActiveBackdropFromMemoryCache() {
+        if (TvRenderingRuntime.profile() == TvRenderingProfile.FIRE_TV_PERFORMANCE) {
+            val cache = context.imageLoader.memoryCache
+            activeBackdropCacheKeys.forEach { cache?.remove(MemoryCache.Key(it)) }
+        }
+        activeBackdropCacheKeys = emptyList()
+    }
+
+    private fun evictActiveLogoFromMemoryCache() {
+        if (TvRenderingRuntime.profile() == TvRenderingProfile.FIRE_TV_PERFORMANCE) {
+            activeLogoCacheKey?.let { context.imageLoader.memoryCache?.remove(MemoryCache.Key(it)) }
+        }
+        activeLogoCacheKey = null
+    }
+
+    private fun canLoadArtwork(): Boolean =
+        isAttachedToWindow && isShown && windowVisibility == View.VISIBLE
+
     private fun preload(candidate: HeroCandidate?) {
+        // The AFTKM profile has enough memory for the displayed hero, not a second 1280x720
+        // decoded bitmap that the user may never see.
+        if (TvRenderingRuntime.profile() == TvRenderingProfile.FIRE_TV_PERFORMANCE) {
+            preloadDisposable?.dispose()
+            preloadDisposable = null
+            preloadedBackdropKey = null
+            return
+        }
         val request = candidate?.let(::artworkRequests)?.firstOrNull()
         val backdropKey = request?.cacheKey
         if (preloadedBackdropKey == backdropKey) return
@@ -350,6 +470,11 @@ class HeroRowView(
                 .data(request.url)
                 .size(HERO_IMAGE_WIDTH, HERO_IMAGE_HEIGHT)
                 .memoryCacheKey(request.cacheKey)
+                .setParameter(
+                    PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
+                    PtvCoilEventListenerFactory.CATEGORY_HERO,
+                    null
+                )
                 .build()
         )
     }

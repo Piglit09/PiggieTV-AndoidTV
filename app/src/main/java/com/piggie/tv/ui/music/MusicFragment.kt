@@ -10,7 +10,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
-import coil.dispose
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
@@ -707,7 +706,7 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
         override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
 
         override fun onViewRecycled(holder: MediaCardHolder) {
-            holder.image.dispose()
+            MediaCardFactory.recycleView(holder)
             holder.itemView.setOnClickListener(null)
             holder.itemView.onFocusChangeListener = null
             super.onViewRecycled(holder)

@@ -48,6 +48,83 @@ class PlayerControlsTest {
     }
 
     @Test
+    fun `natural end and user back share one stop report with the final position`() {
+        val state = PlaybackStopReportState()
+        val finalTicks = PlayerRestartPolicy.positionTicks(maxOf(12_000L, 12_345L))
+
+        val first = state.begin("movie-1", "session-1", finalTicks)
+        assertTrue(first is PlaybackStopReportDecision.Claimed)
+        val report = (first as PlaybackStopReportDecision.Claimed).report
+        assertEquals("movie-1", report.itemId)
+        assertEquals("session-1", report.playSessionId)
+        assertEquals(123_450_000L, report.positionTicks)
+
+        assertEquals(
+            PlaybackStopReportDecision.InFlight,
+            state.begin("movie-1", "session-1", 999_000_000L)
+        )
+        state.complete(report)
+        assertEquals(
+            PlaybackStopReportDecision.Complete,
+            state.begin("movie-1", "session-1", 999_000_000L)
+        )
+    }
+
+    @Test
+    fun `user back waits when an autoplay stop report is already in flight`() {
+        val state = PlaybackStopReportState()
+        val autoplay = state.begin("episode-1", "autoplay-session", 500L)
+            as PlaybackStopReportDecision.Claimed
+
+        assertEquals(
+            PlaybackStopReportDecision.InFlight,
+            state.begin("episode-1", "autoplay-session", 700L)
+        )
+        state.complete(autoplay.report)
+        assertEquals(
+            PlaybackStopReportDecision.Complete,
+            state.begin("episode-1", "autoplay-session", 700L)
+        )
+    }
+
+    @Test
+    fun `dialog restart can stop a new play session for the same item`() {
+        val state = PlaybackStopReportState()
+        val original = state.begin("movie-1", "session-before-restart", 10L)
+            as PlaybackStopReportDecision.Claimed
+        state.complete(original.report)
+
+        val restarted = state.begin("movie-1", "session-after-restart", 20L)
+        assertTrue(restarted is PlaybackStopReportDecision.Claimed)
+        assertEquals(
+            "session-after-restart",
+            (restarted as PlaybackStopReportDecision.Claimed).report.playSessionId
+        )
+    }
+
+    @Test
+    fun `stop report is not created before Jellyfin assigns a play session`() {
+        val state = PlaybackStopReportState()
+
+        assertEquals(
+            PlaybackStopReportDecision.NoActiveSession,
+            state.begin("movie-1", "", 123L)
+        )
+        assertEquals(
+            PlaybackStopReportDecision.NoActiveSession,
+            state.begin("", "session-1", 123L)
+        )
+    }
+
+    @Test
+    fun `stop report position cannot be negative`() {
+        val result = PlaybackStopReportState().begin("movie-1", "session-1", -1L)
+            as PlaybackStopReportDecision.Claimed
+
+        assertEquals(0L, result.report.positionTicks)
+    }
+
+    @Test
     fun `dialog timeout chain preserves baseline and rejects stale restoration`() {
         val state = PlayerDialogTimeoutState()
         val firstDialog = state.begin(currentTimeoutMs = 5_000)

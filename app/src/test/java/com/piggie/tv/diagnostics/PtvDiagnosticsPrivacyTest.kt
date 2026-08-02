@@ -57,6 +57,10 @@ class PtvDiagnosticsPrivacyTest {
         val json = PtvDiagnosticExporter.toJson(snapshot).toString()
         assertTrue(json.contains("schemaVersion"))
         assertTrue(json.contains("routeTraces"))
+        assertTrue(json.contains("\"rendering\""))
+        assertTrue(json.contains("\"renderingProfile\""))
+        assertTrue(json.contains("\"staticGlassEnabled\""))
+        assertTrue(json.contains("\"focusScale\""))
         listOf("event-secret", "url-secret", "play-secret", "crash-secret").forEach { assertFalse(json.contains(it)) }
         assertFalse(json.contains("0123456789abcdef"))
         assertTrue(json.contains("[ID:0123…cdef]"))

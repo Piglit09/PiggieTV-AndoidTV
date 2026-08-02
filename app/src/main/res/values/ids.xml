@@ -24,4 +24,5 @@
     <item name="player_connection_speed_btn" type="id" />
 
     <item name="ptv_content_frame" type="id" />
+    <item name="ptv_header" type="id" />
 </resources>

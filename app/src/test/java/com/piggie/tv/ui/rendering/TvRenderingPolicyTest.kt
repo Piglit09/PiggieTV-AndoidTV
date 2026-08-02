@@ -1,8 +1,6 @@
 package com.piggie.tv.ui.rendering
 
 import com.piggie.tv.ui.player.DetailsNavigationPolicy
-import com.piggie.tv.ui.player.ProgressiveDetailsState
-import com.piggie.tv.ui.player.ProgressiveDetailsStateMachine
 import com.piggie.tv.ui.shared.BackdropPolicy
 import com.piggie.tv.ui.shared.BackdropPurpose
 import org.junit.Assert.assertEquals
@@ -30,15 +28,6 @@ class TvRenderingPolicyTest {
         state.clear(7L)
         assertNull(state.focusedKey)
         assertNull(state.bounds)
-    }
-
-    @Test
-    fun `progressive details states only move forward`() {
-        val state = ProgressiveDetailsStateMachine()
-        assertTrue(state.advance(ProgressiveDetailsState.PRIMARY_INTERACTIVE))
-        assertTrue(state.advance(ProgressiveDetailsState.CONTENT))
-        assertFalse(state.advance(ProgressiveDetailsState.PRIMARY_INTERACTIVE))
-        assertEquals(ProgressiveDetailsState.CONTENT, state.state)
     }
 
     @Test
