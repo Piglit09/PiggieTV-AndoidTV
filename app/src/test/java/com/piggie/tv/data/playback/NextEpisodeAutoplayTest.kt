@@ -76,6 +76,16 @@ class NextEpisodeAutoplayTest {
         assertNull(NextEpisodeSelector.select(special2.id, listOf(special1, special2)))
     }
 
+    @Test fun previousEpisodeSelectorStaysInOrderedSeriesResponse() {
+        val first = episode("first", 1, 1)
+        val second = episode("second", 1, 2)
+        val third = episode("third", 2, 1)
+
+        assertEquals(second, PreviousEpisodeSelector.select(third.id, listOf(first, second, third)))
+        assertNull(PreviousEpisodeSelector.select(first.id, listOf(first, second, third)))
+        assertNull(PreviousEpisodeSelector.select("outside", listOf(first, second, third)))
+    }
+
     private fun episode(id: String, season: Int, number: Int) = MediaItem(
         id = id,
         title = id,

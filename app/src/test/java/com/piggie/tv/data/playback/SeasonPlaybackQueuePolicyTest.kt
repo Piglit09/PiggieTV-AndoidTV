@@ -46,8 +46,33 @@ class SeasonPlaybackQueuePolicyTest {
         val queue = listOf("s1e1", "s1e2")
 
         assertEquals("s1e2", SeasonPlaybackQueuePolicy.nextId(queue, "s1e1"))
+        assertEquals("s1e1", SeasonPlaybackQueuePolicy.previousId(queue, "s1e2"))
+        assertNull(SeasonPlaybackQueuePolicy.previousId(queue, "s1e1"))
         assertNull(SeasonPlaybackQueuePolicy.nextId(queue, "s1e2"))
         assertNull(SeasonPlaybackQueuePolicy.nextId(queue, "not-in-this-season"))
+    }
+
+    @Test fun `previous control resolves only the prior launch episode`() {
+        val episodes = listOf(episode("one"), episode("two"), episode("three"))
+        val queue = SeasonPlaybackQueuePolicy.build(episodes, SeasonPlaybackMode.PLAY_ALL)
+        SeasonPlaybackQueueHandoff.publish(queue, episodes)
+
+        val previous = SeasonPlaybackQueuePolicy.resolvePrevious(
+            queue = queue,
+            currentItemId = "two",
+            hydratedItem = episode("wrong", id = "outside"),
+            launchItems = SeasonPlaybackQueueHandoff.itemsFor(queue)
+        )
+
+        assertEquals("one", previous?.id)
+        assertNull(
+            SeasonPlaybackQueuePolicy.resolveItem(
+                queue = queue,
+                expectedId = "outside",
+                hydratedItem = episode("outside"),
+                launchItems = mapOf("outside" to episode("outside"))
+            )
+        )
     }
 
     @Test fun `launch episode resolves next item when metadata prefetch times out`() {

@@ -86,8 +86,12 @@ object NativePtvShell {
         // 2. Navigation Rail (In between Logo and Profile)
         val buttons = linkedMapOf<NativeRoute, Button>()
         val rail = LinearLayout(activity).apply {
+            id = R.id.ptv_nav_rail
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.tv_nav_rail)
+            val railPadding = activity.dim(R.dimen.tv_nav_rail_padding)
+            setPadding(railPadding, railPadding, railPadding, railPadding)
         }
         val primaryRoutes = NativeRoute.entries.filter { it != NativeRoute.PROFILE }
         primaryRoutes.forEachIndexed { index, route ->
@@ -123,7 +127,6 @@ object NativePtvShell {
             isFocusable = false
             overScrollMode = View.OVER_SCROLL_NEVER
             clipToPadding = false
-            setPadding(activity.dim(R.dimen.tv_spacing_large), 0, activity.dim(R.dimen.tv_spacing_large), 0)
             addView(rail)
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -139,7 +142,7 @@ object NativePtvShell {
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             isAllCaps = false
             setTextColor(activity.getColor(R.color.tv_text_primary))
-            setBackgroundResource(R.drawable.tv_nav_button)
+            setBackgroundResource(R.drawable.tv_nav_profile_button)
             contentDescription = activity.getString(R.string.profile_button_description)
             isSelected = selected == NativeRoute.PROFILE
             setOnClickListener { onRouteSelected(NativeRoute.PROFILE) }

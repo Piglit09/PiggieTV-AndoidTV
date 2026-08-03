@@ -30,6 +30,8 @@ class DetailsPoliciesTest {
 
         val candidates = DetailsArtworkPolicy.backdropCandidates(series)
 
+        assertEquals("series", DetailsArtworkPolicy.poster(series)?.itemId)
+        assertEquals(DetailsArtworkKind.PRIMARY, DetailsArtworkPolicy.poster(series)?.kind)
         assertEquals("series", candidates.single().itemId)
         assertEquals(DetailsArtworkKind.PRIMARY, candidates.single().kind)
         assertTrue(candidates.single().blurred)
@@ -217,12 +219,91 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `series and season seeds recover their required browser after refresh failure`() {
+        assertTrue(
+            DetailsRefreshFailurePolicy.shouldRecoverSecondary(item("series", "Series"))
+        )
+        assertTrue(
+            DetailsRefreshFailurePolicy.shouldRecoverSecondary(
+                item("season", "Season").copy(seriesId = "series")
+            )
+        )
+        assertFalse(
+            DetailsRefreshFailurePolicy.shouldRecoverSecondary(item("episode", "Episode"))
+        )
+        assertFalse(
+            DetailsRefreshFailurePolicy.shouldRecoverSecondary(item("movie", "Movie"))
+        )
+    }
+
+    @Test
+    fun `id-only View Series navigation reuses only its exact cached seed`() {
+        val cachedSeries = item("series", "Series").copy(title = "Cached Series")
+        MediaDetailsSeedStore.clear()
+        try {
+            MediaDetailsSeedStore.put(cachedSeries, nowMs = 1_000L)
+            val cached = MediaDetailsSeedStore.getItem("series", nowMs = 1_000L)
+
+            assertEquals(
+                cachedSeries,
+                NestedDetailsSeedPolicy.resolve(" series ", cached)
+            )
+            assertNull(
+                NestedDetailsSeedPolicy.resolve("different-series", cachedSeries)
+            )
+            assertNull(NestedDetailsSeedPolicy.resolve("  ", cachedSeries))
+            assertNull(NestedDetailsSeedPolicy.resolve("series", null))
+        } finally {
+            MediaDetailsSeedStore.clear()
+        }
+    }
+
+    @Test
     fun `season containers never request video track metadata`() {
         assertFalse(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("series", "Series")))
         assertFalse(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("season", "Season")))
         assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("movie", "Movie")))
         assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("episode", "Episode")))
         assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("video", "Video")))
+    }
+
+    @Test
+    fun `series playback keeps every valid series episode in server order`() {
+        val series = item(" series ", "Series")
+        val candidates = listOf(
+            item("episode-1", "Episode").copy(seriesId = "series"),
+            item(" episode-2 ", "episode").copy(seriesId = null),
+            item("episode-3", "Episode").copy(seriesId = " series ")
+        )
+
+        val episodes = SeriesPlaybackQueuePolicy.episodes(series, candidates)
+
+        assertEquals(listOf("episode-1", "episode-2", "episode-3"), episodes.map { it.id })
+        assertTrue(episodes.all { it.seriesId == "series" })
+    }
+
+    @Test
+    fun `series playback rejects invalid duplicates but retains merged library episodes`() {
+        val series = item("series", "Series")
+        val valid = item("episode-1", "Episode").copy(seriesId = "series")
+        val episodes = SeriesPlaybackQueuePolicy.episodes(
+            series,
+            listOf(
+                valid,
+                valid.copy(title = "duplicate"),
+                item("movie", "Movie").copy(seriesId = "series"),
+                item(" ", "Episode").copy(seriesId = "series"),
+                item("episode-2", "Episode").copy(seriesId = "other-series"),
+                item("series", "Episode").copy(seriesId = "series")
+            )
+        )
+
+        assertEquals(listOf("episode-1", "episode-2"), episodes.map { it.id })
+        assertEquals("other-series", episodes.last().seriesId)
+        assertNull(SeriesPlaybackQueuePolicy.validSeriesId(item("series", "Movie")))
+        assertTrue(
+            SeriesPlaybackQueuePolicy.episodes(item(" ", "Series"), listOf(valid)).isEmpty()
+        )
     }
 
     @Test
@@ -311,6 +392,30 @@ class DetailsPoliciesTest {
 
         assertEquals(now + 90L * 60_000L, DetailsTimePolicy.endsAtMillis(now, runtime, position))
         assertNull(DetailsTimePolicy.endsAtMillis(now, 0L, 0L))
+    }
+
+    @Test
+    fun `movie facts resolve one coherent directed play time and ends row`() {
+        val now = 10_000L
+        val runtime = 125L * 600_000_000L
+        val position = 5L * 600_000_000L
+
+        assertEquals(
+            MovieDetailsFacts(
+                directedBy = "Jane Director",
+                playTime = "02:05",
+                endsAtMillis = now + 120L * 60_000L
+            ),
+            MovieDetailsFactsPolicy.resolve(
+                item("movie", "Movie").copy(
+                    director = "  Jane Director  ",
+                    runtimeTicks = runtime,
+                    playbackPositionTicks = position
+                ),
+                nowMillis = now
+            )
+        )
+        assertNull(MovieDetailsFactsPolicy.resolve(item("series", "Series"), now))
     }
 
     @Test

@@ -42,6 +42,7 @@ import com.piggie.tv.ui.layout.TvHorizontalRecyclerView
 import com.piggie.tv.ui.layout.TvLinearLayoutManager
 import com.piggie.tv.ui.layout.TvShelfScrollCoordinator
 import com.piggie.tv.ui.player.MediaDetailsActivity
+import com.piggie.tv.ui.player.PlaybackLaunchOrigin
 import com.piggie.tv.ui.player.VideoPlayerActivity
 import com.piggie.tv.ui.rendering.applyRenderingTuning
 import com.piggie.tv.ui.widgets.MediaCardFactory
@@ -350,8 +351,21 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
     }
 
     private fun playHeroItem(item: MediaItem) {
+        val origin = if (
+            heroState?.current?.item?.id == item.id &&
+            heroState?.current?.source == HeroSource.CONTINUE
+        ) {
+            PlaybackLaunchOrigin.CONTINUE_WATCHING
+        } else {
+            PlaybackLaunchOrigin.DEFAULT
+        }
         if (item.type != "Series") {
-            VideoPlayerActivity.start(requireContext(), item.id, item.playbackPositionTicks)
+            VideoPlayerActivity.start(
+                requireContext(),
+                item.id,
+                item.playbackPositionTicks,
+                origin = origin
+            )
             return
         }
         thread(name = "ptv-hero-play-series", start = true) {
@@ -362,7 +376,8 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
                     VideoPlayerActivity.start(
                         requireContext(),
                         episode.id,
-                        episode.playbackPositionTicks
+                        episode.playbackPositionTicks,
+                        origin = origin
                     )
                 } else {
                     MediaDetailsActivity.start(requireContext(), item)
@@ -416,12 +431,26 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
                 onImageReady = firstPosterCallback
             )
             holder.itemView.setOnClickListener {
-                if (item.type == "ViewMore") {
-                    browseRequest?.let { request ->
-                        com.piggie.tv.ui.library.LibraryBrowserActivity.start(it.context, request)
+                when (
+                    DiscoveryMediaActionPolicy.resolve(
+                        itemType = item.type,
+                        shelfType = shelf.definition.type
+                    )
+                ) {
+                    DiscoveryMediaAction.VIEW_MORE -> {
+                        browseRequest?.let { request ->
+                            com.piggie.tv.ui.library.LibraryBrowserActivity.start(it.context, request)
+                        }
                     }
-                } else {
-                    MediaDetailsActivity.start(it.context, item)
+                    DiscoveryMediaAction.RESUME_PLAYBACK -> {
+                        VideoPlayerActivity.start(
+                            it.context,
+                            item.id,
+                            item.playbackPositionTicks,
+                            origin = PlaybackLaunchOrigin.CONTINUE_WATCHING
+                        )
+                    }
+                    DiscoveryMediaAction.DETAILS -> MediaDetailsActivity.start(it.context, item)
                 }
             }
             holder.itemView.setOnFocusChangeListener { view, focused ->

@@ -25,4 +25,5 @@
 
     <item name="ptv_content_frame" type="id" />
     <item name="ptv_header" type="id" />
+    <item name="ptv_nav_rail" type="id" />
 </resources>

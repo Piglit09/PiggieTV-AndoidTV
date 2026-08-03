@@ -64,7 +64,7 @@ object TvCompactTargets {
     const val CANVAS_WIDTH_DP = 960
     const val CANVAS_HEIGHT_DP = 540
     const val HORIZONTAL_MARGIN_DP = 40
-    const val HERO_HEIGHT_DP = 170
+    const val HERO_HEIGHT_DP = 215
     const val POSTER_WIDTH_DP = 100
     const val LANDSCAPE_WIDTH_DP = 184
     const val SQUARE_WIDTH_DP = 112

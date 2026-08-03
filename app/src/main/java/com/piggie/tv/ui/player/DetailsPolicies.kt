@@ -394,6 +394,58 @@ object DetailsSecondaryLoadingPolicy {
 }
 
 /**
+ * A failed full-item refresh must not strand a cached container page without its browser shelf.
+ * Movies and episodes have no required nested browser and retain the existing lightweight
+ * fallback behavior.
+ */
+object DetailsRefreshFailurePolicy {
+    fun shouldRecoverSecondary(item: MediaItem): Boolean = when (
+        DetailsSecondaryLoadingPolicy.decide(item).kind
+    ) {
+        DetailsSecondaryLoadKind.SERIES_SEASONS,
+        DetailsSecondaryLoadKind.SEASON_EPISODES -> true
+        DetailsSecondaryLoadKind.RELATED_ONLY -> false
+    }
+}
+
+/** Uses an exact cached item for ID-only nested navigation; mismatched cache data is ignored. */
+object NestedDetailsSeedPolicy {
+    fun resolve(requestedItemId: String, cachedItem: MediaItem?): MediaItem? {
+        val requested = requestedItemId.trim().takeIf(String::isNotEmpty) ?: return null
+        return cachedItem?.takeIf { it.id.trim() == requested }
+    }
+}
+
+/**
+ * Normalizes the series-scoped episode response before it becomes an explicit player queue.
+ * The returned list is the complete, finite boundary supplied to the player. Jellyfin may merge
+ * physical Series folders behind one display Series, so the authoritative series-scoped response
+ * can legitimately contain different SeriesId values. Only invalid IDs, duplicates, and
+ * non-episodes are removed here.
+ */
+object SeriesPlaybackQueuePolicy {
+    fun validSeriesId(series: MediaItem): String? = series.id
+        .trim()
+        .takeIf {
+            it.isNotEmpty() && series.type.equals("Series", ignoreCase = true)
+        }
+
+    fun episodes(series: MediaItem, candidates: List<MediaItem>): List<MediaItem> {
+        val seriesId = validSeriesId(series) ?: return emptyList()
+        return candidates.asSequence()
+            .filter { it.type.equals("Episode", ignoreCase = true) }
+            .mapNotNull { episode ->
+                val episodeId = episode.id.trim().takeIf { it.isNotEmpty() && it != seriesId }
+                    ?: return@mapNotNull null
+                val explicitParent = episode.seriesId?.trim()?.takeIf(String::isNotEmpty)
+                episode.copy(id = episodeId, seriesId = explicitParent ?: seriesId)
+            }
+            .distinctBy(MediaItem::id)
+            .toList()
+    }
+}
+
+/**
  * A lightweight discovery item can contain episode ancestry that a later details response omits.
  * Keep that route identity while still allowing every value returned by full details to win.
  */
@@ -442,6 +494,29 @@ object DetailsTimePolicy {
         if (runtimeTicks <= 0L) return null
         val remainingTicks = (runtimeTicks - playbackPositionTicks.coerceAtLeast(0L)).coerceAtLeast(0L)
         return nowMillis + remainingTicks / TICKS_PER_MILLISECOND
+    }
+}
+
+data class MovieDetailsFacts(
+    val directedBy: String?,
+    val playTime: String?,
+    val endsAtMillis: Long?
+)
+
+/** Values rendered together in the single movie-facts row beside the poster. */
+object MovieDetailsFactsPolicy {
+    fun resolve(item: MediaItem, nowMillis: Long): MovieDetailsFacts? {
+        if (!item.type.equals("Movie", ignoreCase = true)) return null
+        val playTime = DetailsTimePolicy.playTime(item.runtimeTicks)
+        return MovieDetailsFacts(
+            directedBy = item.director?.trim()?.takeIf(String::isNotEmpty),
+            playTime = playTime,
+            endsAtMillis = if (playTime == null) null else DetailsTimePolicy.endsAtMillis(
+                nowMillis = nowMillis,
+                runtimeTicks = item.runtimeTicks,
+                playbackPositionTicks = item.playbackPositionTicks
+            )
+        )
     }
 }
 

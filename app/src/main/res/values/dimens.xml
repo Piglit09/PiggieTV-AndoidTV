@@ -11,6 +11,7 @@
     <dimen name="tv_nav_button_width">78dp</dimen>
     <dimen name="tv_nav_button_height">34dp</dimen>
     <dimen name="tv_nav_button_spacing">4dp</dimen>
+    <dimen name="tv_nav_rail_padding">4dp</dimen>
     <dimen name="tv_nav_text_size">12sp</dimen>
     <dimen name="tv_profile_button_width">72dp</dimen>
     <dimen name="tv_profile_button_height">32dp</dimen>
@@ -27,7 +28,8 @@
 
     <!-- Hero -->
     <!-- Exact total discovery hero RecyclerView row height for TV_COMPACT. -->
-    <dimen name="tv_hero_height">170dp</dimen>
+    <dimen name="tv_hero_height">215dp</dimen>
+    <dimen name="tv_hero_corner_radius">12dp</dimen>
     <dimen name="tv_settings_content_width">720dp</dimen>
     <dimen name="tv_hero_content_width">420dp</dimen>
     <dimen name="tv_hero_logo_max_width">200dp</dimen>
@@ -46,11 +48,11 @@
 
     <!-- Cards -->
     <dimen name="tv_poster_width">100dp</dimen>
-    <dimen name="tv_poster_height">150dp</dimen>
+    <dimen name="tv_poster_height">144dp</dimen>
     <dimen name="tv_landscape_width">184dp</dimen>
-    <dimen name="tv_landscape_height">104dp</dimen>
+    <dimen name="tv_landscape_height">96dp</dimen>
     <dimen name="tv_square_width">112dp</dimen>
-    <dimen name="tv_square_height">112dp</dimen>
+    <dimen name="tv_square_height">104dp</dimen>
     <dimen name="tv_card_padding">4dp</dimen>
     <dimen name="tv_focus_border_width">3dp</dimen>
     <dimen name="tv_media_artwork_corner_radius">9dp</dimen>
@@ -58,14 +60,14 @@
     <dimen name="tv_card_title_height">28dp</dimen>
     <!-- 36dp fixed metadata body plus 9dp behind the artwork's lower corner cutouts. -->
     <dimen name="tv_card_metadata_surface_height">45dp</dimen>
-    <dimen name="tv_shelf_extra_height">72dp</dimen>
+    <dimen name="tv_shelf_extra_height">60dp</dimen>
     <dimen name="tv_shelf_corner_radius">12dp</dimen>
     <dimen name="tv_shelf_stroke_width">1dp</dimen>
-    <dimen name="tv_shelf_glass_header_height">48dp</dimen>
-    <dimen name="tv_shelf_glass_padding_vertical">8dp</dimen>
+    <dimen name="tv_shelf_glass_header_height">40dp</dimen>
+    <dimen name="tv_shelf_glass_padding_vertical">6dp</dimen>
     <dimen name="tv_shelf_margin_horizontal">10dp</dimen>
     <dimen name="tv_shelf_margin_vertical">6dp</dimen>
-    <dimen name="tv_shelf_card_inset">12dp</dimen>
+    <dimen name="tv_shelf_card_inset">8dp</dimen>
     <dimen name="tv_missing_artwork_height">72dp</dimen>
     <dimen name="tv_avatar_size">64dp</dimen>
     <dimen name="tv_rating_icon_size">18dp</dimen>

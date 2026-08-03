@@ -73,3 +73,16 @@ object NextEpisodeSelector {
             .firstOrNull { it.type.equals("Episode", ignoreCase = true) && it.id != currentItemId }
     }
 }
+
+/** Selects the previous episode from Jellyfin's ordered, series-scoped episode response. */
+object PreviousEpisodeSelector {
+    fun select(currentItemId: String, orderedEpisodes: List<MediaItem>): MediaItem? {
+        val currentIndex = orderedEpisodes.indexOfFirst { it.id == currentItemId }
+        if (currentIndex <= 0) return null
+        return orderedEpisodes
+            .asSequence()
+            .take(currentIndex)
+            .filter { it.type.equals("Episode", ignoreCase = true) && it.id != currentItemId }
+            .lastOrNull()
+    }
+}

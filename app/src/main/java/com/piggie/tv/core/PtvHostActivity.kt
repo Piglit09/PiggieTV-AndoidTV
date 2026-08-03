@@ -1,6 +1,7 @@
 package com.piggie.tv.core
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -68,9 +69,12 @@ class PtvHostActivity : AppCompatActivity() {
         // their views synchronously and read the host session, so the session must exist first.
         super.onCreate(savedInstanceState)
 
+        val requestedLaunchRoute = consumeRequestedRoute(intent)
         if (savedInstanceState != null) {
             val restoredRoute = savedInstanceState.getString("current_route", NativeRoute.HOME.name)
             currentRoute = NativeRouteNavigator.restoreTarget(restoredRoute)
+        } else if (requestedLaunchRoute != null) {
+            currentRoute = requestedLaunchRoute
         }
         
         MusicPlaybackManager.init(this)
@@ -96,14 +100,25 @@ class PtvHostActivity : AppCompatActivity() {
             false
         )
         
-        if (savedInstanceState == null || visibleFragment?.tag != routeTag(currentRoute)) {
-            showRoute(currentRoute)
+        if (
+            requestedLaunchRoute != null ||
+            savedInstanceState == null ||
+            visibleFragment?.tag != routeTag(currentRoute)
+        ) {
+            showRoute(requestedLaunchRoute ?: currentRoute)
         } else {
             // Restore selection state for navigation buttons
             navigation.forEach { (route, button) -> button.isSelected = route == currentRoute }
         }
 
         PerformanceMonitor.setVisible(this, NativeSettings(this).diagnosticsOverlayEnabled)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val requestedRoute = consumeRequestedRoute(intent)
+        setIntent(intent)
+        requestedRoute?.let(::showRoute)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -450,6 +465,26 @@ class PtvHostActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val ACTION_RETURN_HOME = "com.piggie.tv.action.RETURN_HOME"
+
+        /**
+         * Brings the existing TV host to the front and selects Home without rebuilding its route
+         * cache. CLEAR_TOP removes the player (and any transient screen above the host), while
+         * SINGLE_TOP guarantees delivery through onNewIntent() to the existing host instance.
+         */
+        internal fun returnHomeIntent(context: Context): Intent =
+            Intent(context, PtvHostActivity::class.java).apply {
+                action = ACTION_RETURN_HOME
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+
+        internal fun requestedRoute(intent: Intent?): NativeRoute? =
+            NativeRoute.HOME.takeIf { intent?.action == ACTION_RETURN_HOME }
+
+        /** Consumes the handoff so a later host recreation restores its then-current route. */
+        internal fun consumeRequestedRoute(intent: Intent?): NativeRoute? =
+            requestedRoute(intent)?.also { intent?.action = null }
+
         // Vertically virtualized discovery pages retain only visible/near-visible shelves.
         // Keeping the previous route avoids reconstructing those shelves during TV round trips.
         private const val ROUTE_CACHE_SIZE = 2

@@ -8,7 +8,7 @@ enum class SeasonPlaybackMode {
     SHUFFLE_ALL
 }
 
-/** Builds and advances the explicit queue requested from a season's episode shelf. */
+/** Builds and advances an explicit, bounded episode queue requested from season or series details. */
 object SeasonPlaybackQueuePolicy {
     fun build(
         episodes: List<MediaItem>,
@@ -35,6 +35,12 @@ object SeasonPlaybackQueuePolicy {
         return queue.getOrNull(currentIndex + 1)
     }
 
+    fun previousId(queue: List<String>, currentItemId: String): String? {
+        val currentIndex = queue.indexOf(currentItemId)
+        if (currentIndex <= 0) return null
+        return queue.getOrNull(currentIndex - 1)
+    }
+
     /**
      * Resolves only the next item named by the explicit season queue. A hydrated server result
      * wins, but the launch-time episode remains a safe fallback when metadata prefetch times out.
@@ -46,6 +52,27 @@ object SeasonPlaybackQueuePolicy {
         launchItems: Map<String, MediaItem>
     ): MediaItem? {
         val expectedId = nextId(queue, currentItemId) ?: return null
+        return resolveItem(queue, expectedId, hydratedItem, launchItems)
+    }
+
+    fun resolvePrevious(
+        queue: List<String>,
+        currentItemId: String,
+        hydratedItem: MediaItem?,
+        launchItems: Map<String, MediaItem>
+    ): MediaItem? {
+        val expectedId = previousId(queue, currentItemId) ?: return null
+        return resolveItem(queue, expectedId, hydratedItem, launchItems)
+    }
+
+    /** Resolves an episode only when its ID belongs to the authoritative explicit queue. */
+    fun resolveItem(
+        queue: List<String>,
+        expectedId: String,
+        hydratedItem: MediaItem?,
+        launchItems: Map<String, MediaItem>
+    ): MediaItem? {
+        if (expectedId !in queue) return null
         return hydratedItem
             ?.takeIf { it.id == expectedId && it.type.equals("Episode", ignoreCase = true) }
             ?: launchItems[expectedId]
@@ -54,8 +81,8 @@ object SeasonPlaybackQueuePolicy {
 }
 
 /**
- * Process-local handoff for the episode DTOs already loaded by the season details screen.
- * Only one season can own the video player, so replacing one immutable snapshot bounds memory
+ * Process-local handoff for episode DTOs already loaded by season or series details.
+ * Only one explicit queue can own the video player, so replacing one immutable snapshot bounds memory
  * while the queue IDs in the Intent remain the authority after process recreation.
  */
 object SeasonPlaybackQueueHandoff {

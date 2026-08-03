@@ -9,6 +9,7 @@ import com.piggie.tv.data.discovery.DiscoveryQueryPlanner
 import com.piggie.tv.data.playback.ImageSizing
 import com.piggie.tv.data.playback.PlaybackProgress
 import com.piggie.tv.data.playback.NextEpisodeSelector
+import com.piggie.tv.data.playback.PreviousEpisodeSelector
 import com.piggie.tv.data.playback.PlaybackDeviceProfile
 import com.piggie.tv.data.playback.PlaybackMediaSourcePolicy
 import com.piggie.tv.util.JellyfinServerUrl
@@ -203,9 +204,25 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadItem(session: NativeSession, itemId: String): MediaItem {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,CriticRating,People,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,Chapters,CriticRating,People,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
         val endpoint = session.serverUrl + "/Users/" + user + "/Items/" + encode(itemId) + "?Fields=" + fields
         return parseItem(JSONObject(request(endpoint, token = session.token)))
+    }
+
+    /**
+     * Loads exact intro/outro ranges from Jellyfin's native media-segment endpoint.
+     * Servers without media-segment support may return an HTTP error; callers should then use
+     * the chapter-marker fallback already attached to [MediaItem.playbackSkipSegments].
+     */
+    fun loadPlaybackSkipSegments(
+        session: NativeSession,
+        itemId: String
+    ): List<PlaybackSkipSegment> {
+        val endpoint = session.serverUrl + "/MediaSegments/" + encode(itemId) +
+            "?includeSegmentTypes=Intro&includeSegmentTypes=Outro"
+        return JellyfinPlaybackSkipSegmentParser.parseMediaSegments(
+            request(endpoint, token = session.token)
+        )
     }
 
     fun loadSeasons(session: NativeSession, seriesId: String): List<MediaItem> {
@@ -219,6 +236,18 @@ class JellyfinNativeApi(private val context: Context) {
         val user = encode(session.userId)
         val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Episodes?SeasonId=" + encode(seasonId) + "&UserId=" + user + "&Fields=" + fields
+        return parseItems(request(endpoint, token = session.token))
+    }
+
+    /** Loads the complete series-scoped episode set used by explicit Play All/Shuffle queues. */
+    fun loadSeriesEpisodes(session: NativeSession, seriesId: String): List<MediaItem> {
+        val user = encode(session.userId)
+        // Queue construction needs stable identity/order, duration, and progress only. Requesting
+        // full details artwork, People, Genres, and ratings makes large shows exceed a megabyte and
+        // contend with the visible details requests long enough to reach the client timeout.
+        val fields = "PrimaryImageAspectRatio,ImageTags,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) +
+            "/Episodes?UserId=" + user + "&EnableUserData=true&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
@@ -251,6 +280,11 @@ class JellyfinNativeApi(private val context: Context) {
         val episodes = parseItems(request(endpoint, token = session.token))
         return NextEpisodeSelector.select(current.id, episodes)
             ?: loadNextUpForSeries(session, seriesId)?.takeIf { it.id != current.id }
+    }
+
+    fun loadPreviousEpisode(session: NativeSession, current: MediaItem): MediaItem? {
+        val seriesId = current.seriesId ?: return null
+        return PreviousEpisodeSelector.select(current.id, loadSeriesEpisodes(session, seriesId))
     }
 
     fun loadHero(session: NativeSession): MediaItem? {
@@ -633,6 +667,7 @@ class JellyfinNativeApi(private val context: Context) {
                 if (person.type == "Director") directorName = person.name
             }
         }
+        val runtimeTicks = item.optLong("RunTimeTicks", 0L)
         return MediaItem(
             id = id,
             title = item.optString("Name").ifBlank { "Untitled" },
@@ -644,7 +679,7 @@ class JellyfinNativeApi(private val context: Context) {
             seriesName = item.optString("SeriesName").ifBlank { null },
             episodeLabel = label,
             playbackPositionTicks = userData?.optLong("PlaybackPositionTicks", 0L) ?: 0L,
-            runtimeTicks = item.optLong("RunTimeTicks", 0L),
+            runtimeTicks = runtimeTicks,
             overview = item.optString("Overview"),
             communityRating = item.optDouble("CommunityRating", 0.0).toFloat().takeIf { it > 0 },
             officialRating = item.optString("OfficialRating"),
@@ -682,7 +717,11 @@ class JellyfinNativeApi(private val context: Context) {
             seriesPrimaryImageTag = item.nonBlankString("SeriesPrimaryImageTag"),
             audioTracks = playbackTracks.audioTracks,
             subtitleTracks = playbackTracks.subtitleTracks,
-            mediaSourceId = playbackTracks.mediaSourceId
+            mediaSourceId = playbackTracks.mediaSourceId,
+            playbackSkipSegments = JellyfinPlaybackSkipSegmentParser.parseChapterMarkers(
+                item,
+                runtimeTicks
+            )
         )
     }
 

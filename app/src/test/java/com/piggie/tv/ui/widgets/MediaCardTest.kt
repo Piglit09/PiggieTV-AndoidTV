@@ -61,9 +61,9 @@ class MediaCardTest {
 
     @Test
     fun compactBucketUsesProductionArtworkDimensions() {
-        assertArtworkSize(MediaCardPresentation.POSTER, widthDp = 100, heightDp = 150)
-        assertArtworkSize(MediaCardPresentation.LANDSCAPE, widthDp = 184, heightDp = 104)
-        assertArtworkSize(MediaCardPresentation.SQUARE, widthDp = 112, heightDp = 112)
+        assertArtworkSize(MediaCardPresentation.POSTER, widthDp = 100, heightDp = 144)
+        assertArtworkSize(MediaCardPresentation.LANDSCAPE, widthDp = 184, heightDp = 96)
+        assertArtworkSize(MediaCardPresentation.SQUARE, widthDp = 112, heightDp = 104)
     }
 
     @Test
