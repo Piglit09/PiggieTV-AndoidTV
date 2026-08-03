@@ -2,12 +2,17 @@ package com.piggie.tv.data.playback
 
 import com.piggie.tv.data.models.MediaItem
 import kotlin.random.Random
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SeasonPlaybackQueuePolicyTest {
+    @After fun clearHandoff() {
+        SeasonPlaybackQueueHandoff.clear()
+    }
+
     @Test fun `play all preserves Jellyfin season order and rejects non episodes`() {
         val queue = SeasonPlaybackQueuePolicy.build(
             listOf(
@@ -43,6 +48,55 @@ class SeasonPlaybackQueuePolicyTest {
         assertEquals("s1e2", SeasonPlaybackQueuePolicy.nextId(queue, "s1e1"))
         assertNull(SeasonPlaybackQueuePolicy.nextId(queue, "s1e2"))
         assertNull(SeasonPlaybackQueuePolicy.nextId(queue, "not-in-this-season"))
+    }
+
+    @Test fun `launch episode resolves next item when metadata prefetch times out`() {
+        val episodes = listOf(episode("s1e1"), episode("s1e2"), episode("s1e3"))
+        val queue = SeasonPlaybackQueuePolicy.build(episodes, SeasonPlaybackMode.PLAY_ALL)
+        SeasonPlaybackQueueHandoff.publish(queue, episodes)
+        val launchItems = SeasonPlaybackQueueHandoff.itemsFor(queue)
+
+        val next = SeasonPlaybackQueuePolicy.resolveNext(
+            queue = queue,
+            currentItemId = "s1e1",
+            hydratedItem = null,
+            launchItems = launchItems
+        )
+
+        assertEquals("s1e2", next?.id)
+        assertEquals("s1e2", next?.title)
+    }
+
+    @Test fun `hydrated metadata wins over the matching launch episode`() {
+        val launchEpisode = episode("launch title", id = "s1e2")
+        val hydratedEpisode = episode("hydrated title", id = "s1e2")
+
+        val next = SeasonPlaybackQueuePolicy.resolveNext(
+            queue = listOf("s1e1", "s1e2"),
+            currentItemId = "s1e1",
+            hydratedItem = hydratedEpisode,
+            launchItems = mapOf("s1e2" to launchEpisode)
+        )
+
+        assertEquals("hydrated title", next?.title)
+    }
+
+    @Test fun `launch snapshot cannot escape the explicit season boundary`() {
+        val queue = listOf("s1e1", "s1e2")
+        val episodes = listOf(episode("s1e1"), episode("s1e2"), episode("s2e1"))
+        SeasonPlaybackQueueHandoff.publish(queue, episodes)
+        val launchItems = SeasonPlaybackQueueHandoff.itemsFor(queue)
+
+        assertNull(
+            SeasonPlaybackQueuePolicy.resolveNext(
+                queue = queue,
+                currentItemId = "s1e2",
+                hydratedItem = episode("s2e1"),
+                launchItems = launchItems
+            )
+        )
+        assertEquals(setOf("s1e1", "s1e2"), launchItems.keys)
+        assertEquals(emptyMap<String, MediaItem>(), SeasonPlaybackQueueHandoff.itemsFor(queue.reversed()))
     }
 
     private fun episode(

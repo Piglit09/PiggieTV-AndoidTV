@@ -320,4 +320,69 @@ class JellyfinNativeApiPlaybackRequestTest {
             )))
         }
     }
+
+    @Test
+    fun `season shelf preserves parent identity artwork overview and episode counts`() {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{
+                    "Items":[{
+                        "Id":"season-2",
+                        "Name":"Season 2",
+                        "Type":"Season",
+                        "SeriesId":"series-1",
+                        "SeriesName":"Piggie Show",
+                        "IndexNumber":2,
+                        "Overview":"Eight more episodes.",
+                        "ChildCount":8,
+                        "EpisodeCount":8,
+                        "RecursiveItemCount":8,
+                        "ParentLogoItemId":"series-1",
+                        "ParentLogoImageTag":"series-logo",
+                        "ParentBackdropItemId":"series-1",
+                        "ParentBackdropImageTags":["series-backdrop"]
+                    }]
+                }""".trimIndent()
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val season = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadSeasons(session, "series-1")
+            .single()
+
+        assertEquals("series-1", season.seriesId)
+        assertEquals("Piggie Show", season.seriesName)
+        assertEquals(2, season.indexNumber)
+        assertEquals("Eight more episodes.", season.overview)
+        assertEquals(8, season.childCount)
+        assertEquals(8, season.episodeCount)
+        assertEquals(8, season.recursiveItemCount)
+        assertEquals("series-1", season.parentLogoItemId)
+        assertEquals("series-logo", season.parentLogoImageTag)
+        assertEquals(listOf("series-backdrop"), season.parentBackdropImageTags)
+
+        val fields = server.takeRequest().requestUrl
+            ?.queryParameter("Fields")
+            .orEmpty()
+            .split(',')
+            .toSet()
+        assertTrue(fields.containsAll(setOf(
+            "SeriesName",
+            "SeriesId",
+            "IndexNumber",
+            "Overview",
+            "ChildCount",
+            "EpisodeCount",
+            "RecursiveItemCount",
+            "ParentLogoItemId",
+            "ParentLogoImageTag"
+        )))
+    }
 }

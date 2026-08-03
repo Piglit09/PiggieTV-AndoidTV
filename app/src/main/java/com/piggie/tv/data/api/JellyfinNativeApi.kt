@@ -210,7 +210,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadSeasons(session: NativeSession, seriesId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,SeriesName,SeriesId,IndexNumber,Overview,ChildCount,EpisodeCount,RecursiveItemCount"
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Seasons?UserId=" + user + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
@@ -666,6 +666,9 @@ class JellyfinNativeApi(private val context: Context) {
             criticRating = item.optDouble("CriticRating", 0.0).toFloat().takeIf { it > 0 },
             director = directorName,
             people = people,
+            childCount = item.optInt("ChildCount", -1).takeIf { it >= 0 },
+            episodeCount = item.optInt("EpisodeCount", -1).takeIf { it >= 0 },
+            recursiveItemCount = item.optInt("RecursiveItemCount", -1).takeIf { it >= 0 },
             backdropImageTags = item.nonBlankStrings("BackdropImageTags"),
             thumbImageTag = imageTags?.nonBlankString("Thumb"),
             parentBackdropItemId = item.nonBlankString("ParentBackdropItemId"),

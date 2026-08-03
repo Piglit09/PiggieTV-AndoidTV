@@ -119,74 +119,71 @@ object SeasonCardPolicy {
             .firstOrNull { it >= 0 }
 }
 
-enum class DetailsFocusRegion {
-    ACTIONS,
-    SEASONS,
-    EPISODES
-}
-
-enum class DetailsFocusDirection {
-    UP,
-    DOWN
-}
-
-object SeasonFocusPolicy {
-    fun target(
-        region: DetailsFocusRegion,
-        direction: DetailsFocusDirection,
-        hasSeasons: Boolean
-    ): DetailsFocusRegion? = when (region to direction) {
-        DetailsFocusRegion.ACTIONS to DetailsFocusDirection.DOWN ->
-            if (hasSeasons) DetailsFocusRegion.SEASONS else null
-        DetailsFocusRegion.SEASONS to DetailsFocusDirection.UP -> DetailsFocusRegion.ACTIONS
-        DetailsFocusRegion.SEASONS to DetailsFocusDirection.DOWN -> DetailsFocusRegion.EPISODES
-        DetailsFocusRegion.EPISODES to DetailsFocusDirection.UP ->
-            if (hasSeasons) DetailsFocusRegion.SEASONS else DetailsFocusRegion.ACTIONS
-        else -> null
-    }
-}
-
-object DetailsInitialFocusPolicy {
-    /** Details owns focus once opened; global shell navigation is outside this focus scope. */
-    fun shouldRequestPrimary(hasFocusInsideDetails: Boolean): Boolean =
-        !hasFocusInsideDetails
-}
-
-enum class SeasonEpisodeEntryDecision {
-    MOVE_TO_EPISODES,
-    WAIT_FOR_EPISODES,
-    PASS_THROUGH
-}
-
-object SeasonEpisodeEntryPolicy {
-    fun decide(hasFocusableEpisode: Boolean, episodesLoading: Boolean): SeasonEpisodeEntryDecision =
-        when {
-            hasFocusableEpisode -> SeasonEpisodeEntryDecision.MOVE_TO_EPISODES
-            episodesLoading -> SeasonEpisodeEntryDecision.WAIT_FOR_EPISODES
-            else -> SeasonEpisodeEntryDecision.PASS_THROUGH
-        }
-}
-
-enum class SeasonSelectionDecision {
-    FOCUS_LOADED_EPISODES,
-    LOAD_AND_FOCUS_EPISODES,
-    LOAD_WITHOUT_MOVING_FOCUS
+enum class SeasonDetailsClickDecision {
+    OPEN_DETAILS,
+    IGNORE
 }
 
 /**
- * A background first-season load must not steal focus from the action row. A center-button
- * selection, however, is an explicit request to enter that season's episode shelf.
+ * Turns a season card from a Series page into a real nested-details destination.
+ *
+ * Jellyfin season-list responses are intentionally lightweight and can omit the parent identity
+ * and artwork needed while the full Season request is in flight. The containing Series is the
+ * authoritative parent for this click, so the seed is normalized before it enters the details
+ * stack. Existing Season artwork remains preferred; Series artwork only fills parent fallbacks.
  */
-object SeasonSelectionPolicy {
-    fun decide(
-        userInitiated: Boolean,
-        isCurrentSeason: Boolean,
-        hasFocusableEpisode: Boolean
-    ): SeasonSelectionDecision = when {
-        !userInitiated -> SeasonSelectionDecision.LOAD_WITHOUT_MOVING_FOCUS
-        isCurrentSeason && hasFocusableEpisode -> SeasonSelectionDecision.FOCUS_LOADED_EPISODES
-        else -> SeasonSelectionDecision.LOAD_AND_FOCUS_EPISODES
+object SeasonDetailsNavigationPolicy {
+    fun clickDecision(series: MediaItem, season: MediaItem): SeasonDetailsClickDecision =
+        if (validPair(series, season)) {
+            SeasonDetailsClickDecision.OPEN_DETAILS
+        } else {
+            SeasonDetailsClickDecision.IGNORE
+        }
+
+    fun routeItem(series: MediaItem, season: MediaItem): MediaItem {
+        if (!validPair(series, season)) return season
+
+        val seriesId = series.id.trim()
+        val seasonId = season.id.trim()
+        val parentBackdropTags = season.parentBackdropImageTags.nonBlankTags().ifEmpty {
+            series.backdropImageTags.nonBlankTags().ifEmpty {
+                listOfNotNull(series.backdropTag.nonBlank())
+            }
+        }
+        val parentLogoTag = season.parentLogoImageTag.nonBlank() ?: series.logoTag.nonBlank()
+        val parentPrimaryTag = season.parentPrimaryImageTag.nonBlank() ?: series.imageTag.nonBlank()
+        val parentThumbTag = season.parentThumbImageTag.nonBlank() ?: series.thumbImageTag.nonBlank()
+
+        return season.copy(
+            id = seasonId,
+            seriesId = seriesId,
+            seriesName = season.seriesName.nonBlank() ?: series.title.nonBlank(),
+            parentBackdropItemId = parentBackdropTags.takeIf { it.isNotEmpty() }?.let { seriesId },
+            parentBackdropImageTags = parentBackdropTags,
+            parentLogoItemId = parentLogoTag?.let { seriesId },
+            parentLogoImageTag = parentLogoTag,
+            parentPrimaryImageItemId = parentPrimaryTag?.let { seriesId },
+            parentPrimaryImageTag = parentPrimaryTag,
+            parentThumbItemId = parentThumbTag?.let { seriesId },
+            parentThumbImageTag = parentThumbTag,
+            seriesPrimaryImageTag = season.seriesPrimaryImageTag.nonBlank() ?: series.imageTag.nonBlank()
+        )
     }
+
+    private fun validPair(series: MediaItem, season: MediaItem): Boolean {
+        val seriesId = series.id.trim()
+        val seasonId = season.id.trim()
+        return series.type.equals("Series", ignoreCase = true) &&
+            season.type.equals("Season", ignoreCase = true) &&
+            seriesId.isNotEmpty() &&
+            seasonId.isNotEmpty() &&
+            seriesId != seasonId
+    }
+
+    private fun String?.nonBlank(): String? = this?.trim()?.takeIf(String::isNotEmpty)
+
+    private fun List<String>.nonBlankTags(): List<String> =
+        map(String::trim).filter(String::isNotEmpty).distinct()
 }
 
 enum class AsyncShelfState {
@@ -336,13 +333,63 @@ object MediaDetailsSeedStore {
     }
 }
 
-/** Resolves the only valid parent-details destination exposed from an episode. */
+/**
+ * Resolves the valid parent-Series destination exposed from nested Episode or Season details.
+ * The established name is retained because Episode was the first supported nested item type.
+ */
 object EpisodeSeriesNavigationPolicy {
     fun seriesId(item: MediaItem): String? {
-        if (!item.type.equals("Episode", ignoreCase = true)) return null
+        if (
+            !item.type.equals("Episode", ignoreCase = true) &&
+            !item.type.equals("Season", ignoreCase = true)
+        ) return null
         return item.seriesId
             ?.trim()
-            ?.takeIf { it.isNotEmpty() && it != item.id }
+            ?.takeIf { it.isNotEmpty() && it != item.id.trim() }
+    }
+}
+
+/** Only concrete video items own playback-track discovery and video actions. */
+object DetailsPlaybackMetadataPolicy {
+    fun needsVideoTracks(item: MediaItem): Boolean =
+        item.type.equals("Movie", ignoreCase = true) ||
+            item.type.equals("Episode", ignoreCase = true) ||
+            item.type.equals("Video", ignoreCase = true)
+}
+
+enum class DetailsSecondaryLoadKind {
+    SERIES_SEASONS,
+    SEASON_EPISODES,
+    RELATED_ONLY
+}
+
+data class DetailsSecondaryLoadDecision(
+    val kind: DetailsSecondaryLoadKind,
+    val seriesId: String? = null,
+    val seasonId: String? = null
+)
+
+/**
+ * Keeps secondary loading aligned with the details item currently on the stack. Series pages own
+ * the season browser; Season pages own one episode list; every other page only needs related data.
+ */
+object DetailsSecondaryLoadingPolicy {
+    fun decide(item: MediaItem): DetailsSecondaryLoadDecision {
+        val itemId = item.id.trim()
+        if (item.type.equals("Series", ignoreCase = true) && itemId.isNotEmpty()) {
+            return DetailsSecondaryLoadDecision(
+                kind = DetailsSecondaryLoadKind.SERIES_SEASONS,
+                seriesId = itemId
+            )
+        }
+        if (item.type.equals("Season", ignoreCase = true) && itemId.isNotEmpty()) {
+            return DetailsSecondaryLoadDecision(
+                kind = DetailsSecondaryLoadKind.SEASON_EPISODES,
+                seriesId = EpisodeSeriesNavigationPolicy.seriesId(item),
+                seasonId = itemId
+            )
+        }
+        return DetailsSecondaryLoadDecision(DetailsSecondaryLoadKind.RELATED_ONLY)
     }
 }
 
@@ -362,6 +409,9 @@ object DetailsNavigationMetadataPolicy {
             seriesName = details.seriesName ?: previous.seriesName,
             indexNumber = details.indexNumber ?: previous.indexNumber,
             parentIndexNumber = details.parentIndexNumber ?: previous.parentIndexNumber,
+            childCount = details.childCount ?: previous.childCount,
+            episodeCount = details.episodeCount ?: previous.episodeCount,
+            recursiveItemCount = details.recursiveItemCount ?: previous.recursiveItemCount,
             episodeLabel = details.episodeLabel ?: previous.episodeLabel,
             backdropImageTags = details.backdropImageTags.ifEmpty { previous.backdropImageTags },
             thumbImageTag = details.thumbImageTag ?: previous.thumbImageTag,

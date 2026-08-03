@@ -139,6 +139,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var episodeList: RecyclerView? = null
     private var episodePlayAllAction: View? = null
     private var episodeShuffleAllAction: View? = null
+    private var currentSeasonEpisodes: List<MediaItem> = emptyList()
     private var relatedList: RecyclerView? = null
     private var primaryAction: View? = null
     private var tracksReady = false
@@ -285,6 +286,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         episodeList = null
         episodePlayAllAction = null
         episodeShuffleAllAction = null
+        currentSeasonEpisodes = emptyList()
         relatedList = null
         primaryAction = null
         currentItem = null
@@ -529,14 +531,14 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 .onFailure { error ->
                     activity?.runOnUiThread {
                         if (!isCurrentRequest(generation, requestedItemId)) return@runOnUiThread
-                        renderLoadFailure(error)
+                        renderLoadFailure(error, generation)
                     }
                 }
         }
     }
 
     private fun isVideoTrackItem(item: MediaItem): Boolean =
-        item.type !in setOf("Series", "Book", "MusicArtist", "MusicAlbum", "Audio")
+        DetailsPlaybackMetadataPolicy.needsVideoTracks(item)
 
     private fun loadPlaybackMetadata(item: MediaItem, generation: Int) {
         launchApiWork(WORK_PLAYBACK_INFO, "ptv-playback-info-${item.id}") {
@@ -571,13 +573,21 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private fun isCurrentRequest(generation: Int, requestedItemId: String): Boolean =
         isAdded && !destroyed && generation == requestGeneration && itemId == requestedItemId
 
-    private fun renderLoadFailure(error: Throwable) {
-        if (currentItem != null) {
+    private fun renderLoadFailure(error: Throwable, generation: Int) {
+        val fallbackItem = currentItem
+        if (fallbackItem != null) {
             Toast.makeText(requireContext(), "Some details could not be refreshed.", Toast.LENGTH_SHORT).show()
-            seasonsSettled = true
-            episodesSettled = true
-            relatedSettled = true
-            schedulePendingActionSecondaryFocus()
+            if (fallbackItem.type.equals("Season", ignoreCase = true)) {
+                // A lightweight Season card already carries the parent Series identity. Preserve
+                // the requested route when the full item refresh times out and load its episodes
+                // from that safe seed instead of leaving a blank secondary surface.
+                renderSecondary(fallbackItem, generation)
+            } else {
+                seasonsSettled = true
+                episodesSettled = true
+                relatedSettled = true
+                schedulePendingActionSecondaryFocus()
+            }
             return
         }
         resetTitleArtwork("Details unavailable")
@@ -601,7 +611,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         resetTitleArtwork(item.title)
         metadataContainer.removeAllViews()
 
-        if (item.type.equals("Episode", ignoreCase = true) && DetailsArtworkPolicy.logoCandidates(item).isNotEmpty()) {
+        if (
+            (item.type.equals("Episode", ignoreCase = true) ||
+                item.type.equals("Season", ignoreCase = true)) &&
+            DetailsArtworkPolicy.logoCandidates(item).isNotEmpty()
+        ) {
             secondaryTitle.text = item.title
         }
 
@@ -660,7 +674,10 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         item.director?.takeIf(String::isNotBlank)?.let { director ->
             addSideInfoValue("DIRECTED BY", director)
         }
-        if (!item.type.equals("Series", ignoreCase = true)) {
+        if (
+            !item.type.equals("Series", ignoreCase = true) &&
+            !item.type.equals("Season", ignoreCase = true)
+        ) {
             DetailsTimePolicy.playTime(item.runtimeTicks)?.let { playTime ->
                 addSideInfoValue("PLAY TIME", playTime)
                 DetailsTimePolicy.endsAtMillis(
@@ -734,11 +751,12 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                             isAdded && !destroyed && currentItem?.id == item.id &&
                             titleLogoGeneration == generation
                         ) {
-                            logo.contentDescription = item.title
+                            logo.contentDescription = item.seriesName?.takeIf(String::isNotBlank) ?: item.title
                             logo.visibility = View.VISIBLE
                             title.visibility = View.GONE
                             secondaryTitle.visibility = if (
-                                item.type.equals("Episode", ignoreCase = true)
+                                item.type.equals("Episode", ignoreCase = true) ||
+                                item.type.equals("Season", ignoreCase = true)
                             ) View.VISIBLE else View.GONE
                         }
                     }
@@ -877,6 +895,12 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         restoreIndex: Int? = null
     ) {
         actionsRow.removeAllViews()
+        episodePlayAllAction = null
+        episodeShuffleAllAction = null
+        if (item.type.equals("Season", ignoreCase = true)) {
+            renderSeasonActions(item, restoreDescription, restoreIndex)
+            return
+        }
         val playableVideo = isVideoTrackItem(item)
         val playLabel = when {
             item.type == "Book" && item.playbackPositionTicks > 0 -> "Resume Reading"
@@ -935,7 +959,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         actionsRow.children().forEach { action ->
             action.setOnKeyListener { _, keyCode, event ->
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
-                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) requestFirstSeasonOrSecondary(action) else false
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) requestFirstSeasonOrSecondary() else false
             }
         }
         if (restoreDescription != null || restoreIndex != null) {
@@ -951,6 +975,89 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             }
         } else if (currentItem != null && root.findFocus() == null) {
             play.requestFocus()
+        }
+    }
+
+    private fun renderSeasonActions(
+        season: MediaItem,
+        restoreDescription: String?,
+        restoreIndex: Int?
+    ) {
+        var defaultFocus: View? = null
+        if (currentSeasonEpisodes.isNotEmpty()) {
+            val playAll = premiumActionButton("Play All", android.R.drawable.ic_media_play) {
+                rememberExternalFocus(activity?.currentFocus)
+                VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = false)
+            }.apply {
+                contentDescription = "Play all episodes in this season"
+                id = View.generateViewId()
+            }
+            val shuffleAll = actionButton(
+                "Shuffle All",
+                true,
+                "Shuffle all episodes in this season"
+            ) { opener ->
+                rememberExternalFocus(opener)
+                VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = true)
+            }.apply { id = View.generateViewId() }
+            playAll.nextFocusRightId = shuffleAll.id
+            shuffleAll.nextFocusLeftId = playAll.id
+            episodePlayAllAction = playAll
+            episodeShuffleAllAction = shuffleAll
+            addAction(playAll)
+            addAction(shuffleAll)
+            defaultFocus = playAll
+        }
+
+        EpisodeSeriesNavigationPolicy.seriesId(season)?.let { seriesId ->
+            val viewSeries = actionButton("View Series", true, SERIES_DESCRIPTION) {
+                openNestedDetails(seriesId)
+            }.apply { tag = VIEW_SERIES_FOCUS_TAG }
+            addAction(viewSeries)
+            if (defaultFocus == null) defaultFocus = viewSeries
+        }
+
+        val favorite = iconActionButton(
+            R.drawable.ic_action_favorite,
+            season.isFavorite,
+            if (season.isFavorite) "Remove from favorites" else "Add to favorites"
+        ) { updateFavorite(season) }
+        addAction(favorite, square = true)
+        if (defaultFocus == null) defaultFocus = favorite
+
+        val played = iconActionButton(
+            R.drawable.ic_action_watched,
+            season.isPlayed,
+            if (season.isPlayed) "Mark unplayed" else "Mark played"
+        ) { updatePlayed(season) }
+        addAction(played, square = true)
+
+        primaryAction = defaultFocus
+        actionsRow.children().forEach { action ->
+            action.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) requestSeasonEpisodeRow(season.id) else false
+            }
+        }
+        restoreActionFocus(defaultFocus, restoreDescription, restoreIndex)
+    }
+
+    private fun restoreActionFocus(
+        defaultFocus: View?,
+        restoreDescription: String?,
+        restoreIndex: Int?
+    ) {
+        if (restoreDescription != null || restoreIndex != null) {
+            val row = actionsRow
+            row.post {
+                if (destroyed || !row.isAttachedToWindow) return@post
+                val target = restoreDescription?.let { description ->
+                    row.children().firstOrNull { it.contentDescription == description }
+                } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
+                (target ?: defaultFocus)?.requestFocus()
+            }
+        } else if (currentItem != null && root.findFocus() == null) {
+            defaultFocus?.requestFocus()
         }
     }
 
@@ -1176,21 +1283,39 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun renderSecondary(item: MediaItem, generation: Int) {
-        renderCast(item)
-        seasonsSettled = item.type != "Series"
-        episodesSettled = item.type != "Series"
-        relatedSettled = false
-        if (item.type == "Series") loadSeasons(item, generation) else {
-            seasonsContainer.visibility = View.GONE
-            episodesContainer.visibility = View.GONE
+        if (item.type.equals("Season", ignoreCase = true)) {
+            castContainer.removeAllViews()
+            castContainer.visibility = View.GONE
+        } else {
+            renderCast(item)
         }
-        loadRelated(item, generation)
+        val loading = DetailsSecondaryLoadingPolicy.decide(item)
+        seasonsSettled = loading.kind != DetailsSecondaryLoadKind.SERIES_SEASONS
+        episodesSettled = loading.kind != DetailsSecondaryLoadKind.SEASON_EPISODES
+        relatedSettled = loading.kind == DetailsSecondaryLoadKind.SEASON_EPISODES
+        when (loading.kind) {
+            DetailsSecondaryLoadKind.SERIES_SEASONS -> {
+                loadSeasons(item, generation)
+                loadRelated(item, generation)
+            }
+            DetailsSecondaryLoadKind.SEASON_EPISODES -> {
+                seasonsContainer.visibility = View.GONE
+                relatedContainer.visibility = View.GONE
+                loadSeasonEpisodes(item, generation)
+            }
+            DetailsSecondaryLoadKind.RELATED_ONLY -> {
+                seasonsContainer.visibility = View.GONE
+                episodesContainer.visibility = View.GONE
+                loadRelated(item, generation)
+            }
+        }
     }
 
     private fun markSecondaryUnresolved(item: MediaItem) {
-        seasonsSettled = item.type != "Series"
-        episodesSettled = item.type != "Series"
-        relatedSettled = false
+        val loading = DetailsSecondaryLoadingPolicy.decide(item)
+        seasonsSettled = loading.kind != DetailsSecondaryLoadKind.SERIES_SEASONS
+        episodesSettled = loading.kind != DetailsSecondaryLoadKind.SEASON_EPISODES
+        relatedSettled = loading.kind == DetailsSecondaryLoadKind.SEASON_EPISODES
     }
 
     private fun renderCast(item: MediaItem) {
@@ -1226,7 +1351,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                             seasonsContainer.visibility = View.GONE
                             episodesContainer.visibility = View.GONE
                         } else {
-                            showSeasons(series, seasons, generation)
+                            showSeasons(series, seasons)
                         }
                         schedulePendingActionSecondaryFocus()
                         schedulePendingDetailsRestore()
@@ -1249,14 +1374,17 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
 
-    private fun showSeasons(series: MediaItem, seasons: List<MediaItem>, generation: Int) {
+    private fun showSeasons(series: MediaItem, seasons: List<MediaItem>) {
+        clearEpisodeShelf()
+        episodesContainer.visibility = View.GONE
+        episodesSettled = true
         seasonsContainer.removeAllViews()
         seasonsContainer.visibility = View.VISIBLE
         seasonsContainer.addView(sectionLabel("Seasons"))
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.HORIZONTAL, false)
         val list = RecyclerView(requireContext()).apply {
             layoutManager = manager
-            adapter = SeasonAdapter(series, seasons, generation)
+            adapter = SeasonAdapter(series, seasons)
             applyRenderingTuning(manager, 7)
         }
         seasonList = list
@@ -1266,71 +1394,77 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             ?.seasonId
             ?.let { savedSeasonId -> seasons.firstOrNull { it.id == savedSeasonId } }
             ?: seasons.first()
-        selectSeason(series, seasonToRestore, generation, false)
+        currentSeasonId = seasonToRestore.id
         list.post {
             schedulePendingActionSecondaryFocus()
             schedulePendingDetailsRestore()
         }
     }
 
-    private fun selectSeason(series: MediaItem, season: MediaItem, generation: Int, userInitiated: Boolean) {
-        val firstEpisode = firstFocusableChild(episodeList)
-        val hasLoadedEpisode = firstEpisode != null || (episodeList?.adapter?.itemCount ?: 0) > 0
-        val decision = SeasonSelectionPolicy.decide(
-            userInitiated = userInitiated,
-            isCurrentSeason = currentSeasonId == season.id,
-            hasFocusableEpisode = hasLoadedEpisode
-        )
-        if (decision == SeasonSelectionDecision.FOCUS_LOADED_EPISODES) {
-            pendingEpisodeFocusSeasonId = season.id
-            if (firstEpisode?.requestFocus() == true) {
-                pendingEpisodeFocusSeasonId = null
-                scrollEpisodesIntoView()
-            } else {
-                episodeList?.post { schedulePendingEpisodeFocus(season.id) }
-            }
-            return
-        }
-
+    private fun loadSeasonEpisodes(season: MediaItem, generation: Int) {
+        val seriesId = EpisodeSeriesNavigationPolicy.seriesId(season)
         currentSeasonId = season.id
+        currentSeasonEpisodes = emptyList()
         episodesSettled = false
-        pendingEpisodeFocusSeasonId = if (
-            decision == SeasonSelectionDecision.LOAD_AND_FOCUS_EPISODES
-        ) season.id else null
         val episodeRequest = ++episodeRequestGeneration
         showEpisodesLoading(season)
-        launchApiWork(WORK_EPISODES, "ptv-episodes-${season.id}") {
-            runCatching { api.loadEpisodes(session, series.id, season.id) }
+        if (seriesId == null) {
+            episodesSettled = true
+            showSeasonEpisodesFailure(season, generation, "Series information is unavailable.")
+            return
+        }
+        launchApiWork(WORK_EPISODES, "ptv-season-details-episodes-${season.id}") {
+            runCatching { api.loadEpisodes(session, seriesId, season.id) }
                 .onSuccess { episodes ->
                     activity?.runOnUiThread {
-                        if (!isCurrentEpisodeRequest(generation, series.id, season.id, episodeRequest)) {
-                            return@runOnUiThread
-                        }
+                        if (
+                            !isCurrentRequest(generation, season.id) ||
+                            currentSeasonId != season.id ||
+                            episodeRequestGeneration != episodeRequest
+                        ) return@runOnUiThread
                         episodesSettled = true
+                        currentSeasonEpisodes = episodes
                         showEpisodes(episodes, season.id)
+                        rerenderActionsPreservingFocus(currentItem ?: season)
                     }
                 }
                 .onFailure {
                     activity?.runOnUiThread {
-                        if (!isCurrentEpisodeRequest(generation, series.id, season.id, episodeRequest)) {
-                            return@runOnUiThread
-                        }
+                        if (
+                            !isCurrentRequest(generation, season.id) ||
+                            currentSeasonId != season.id ||
+                            episodeRequestGeneration != episodeRequest
+                        ) return@runOnUiThread
                         episodesSettled = true
-                        pendingEpisodeFocusSeasonId = null
-                        showEpisodesFailure(series, season, generation)
+                        currentSeasonEpisodes = emptyList()
+                        showSeasonEpisodesFailure(season, generation)
+                        rerenderActionsPreservingFocus(currentItem ?: season)
                     }
                 }
         }
     }
 
-    private fun isCurrentEpisodeRequest(
+    private fun showSeasonEpisodesFailure(
+        season: MediaItem,
         generation: Int,
-        seriesId: String,
-        seasonId: String,
-        episodeRequest: Int
-    ): Boolean = isCurrentRequest(generation, seriesId) &&
-        currentSeasonId == seasonId &&
-        episodeRequestGeneration == episodeRequest
+        message: String = "Episodes could not be loaded."
+    ) {
+        clearEpisodeShelf()
+        episodesContainer.visibility = View.VISIBLE
+        episodesContainer.addView(sectionLabel("Episodes"))
+        episodesContainer.addView(
+            textView(message, R.dimen.tv_text_size_body, R.color.tv_text_secondary),
+            topMargin(R.dimen.tv_spacing_small)
+        )
+        episodesContainer.addView(
+            actionButton("Retry", true, "Retry episodes") {
+                loadSeasonEpisodes(currentItem ?: season, generation)
+            },
+            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height)).apply {
+                topMargin = requireContext().dim(R.dimen.tv_spacing_small)
+            }
+        )
+    }
 
     private fun showEpisodesLoading(season: MediaItem) {
         clearEpisodeShelf()
@@ -1343,28 +1477,6 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 R.color.tv_text_secondary
             ),
             topMargin(R.dimen.tv_spacing_small)
-        )
-    }
-
-    private fun showEpisodesFailure(series: MediaItem, season: MediaItem, generation: Int) {
-        clearEpisodeShelf()
-        episodesContainer.visibility = View.VISIBLE
-        episodesContainer.addView(sectionLabel("Episodes"))
-        episodesContainer.addView(
-            textView(
-                "Episodes could not be loaded.",
-                R.dimen.tv_text_size_body,
-                R.color.tv_text_secondary
-            ),
-            topMargin(R.dimen.tv_spacing_small)
-        )
-        episodesContainer.addView(
-            actionButton("Retry", true, "Retry episodes") {
-                selectSeason(series, season, generation, true)
-            },
-            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height)).apply {
-                topMargin = requireContext().dim(R.dimen.tv_spacing_small)
-            }
         )
     }
 
@@ -1384,7 +1496,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             pendingEpisodeFocusSeasonId = null
             return
         }
-        episodesContainer.addView(episodeHeader(episodes))
+        episodesContainer.addView(sectionLabel("Episodes"))
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.HORIZONTAL, false)
         val list = RecyclerView(requireContext()).apply {
             layoutManager = manager
@@ -1399,63 +1511,9 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
 
-    private fun episodeHeader(episodes: List<MediaItem>): View = LinearLayout(requireContext()).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        addView(sectionLabel("Episodes"), LinearLayout.LayoutParams(0, -2, 1f))
-
-        fun bulkAction(label: String, description: String, shuffle: Boolean): View =
-            actionButton(label, true, description) { opener ->
-                rememberExternalFocus(opener)
-                if (!VideoPlayerActivity.startSeason(requireContext(), episodes, shuffle)) {
-                    Toast.makeText(requireContext(), "No episodes are available to play.", Toast.LENGTH_SHORT).show()
-                }
-            }.apply {
-                setOnKeyListener { _, keyCode, event ->
-                    if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
-                    when (keyCode) {
-                        KeyEvent.KEYCODE_DPAD_DOWN -> {
-                            val target = firstFocusableChild(episodeList)
-                            val moved = target?.requestFocus() == true
-                            if (moved) scrollEpisodesIntoView()
-                            moved
-                        }
-                        KeyEvent.KEYCODE_DPAD_UP -> {
-                            val target = currentSeasonId?.let { selectedSeasonId ->
-                                seasonList?.let { findFocusableViewWithTag(it, selectedSeasonId) }
-                            }
-                            target?.requestFocus() == true
-                        }
-                        else -> false
-                    }
-                }
-            }
-
-        val playAll = bulkAction("Play All", "Play all episodes in this season", false)
-        val shuffleAll = bulkAction("Shuffle All", "Shuffle all episodes in this season", true)
-        playAll.id = View.generateViewId()
-        shuffleAll.id = View.generateViewId()
-        playAll.nextFocusRightId = shuffleAll.id
-        shuffleAll.nextFocusLeftId = playAll.id
-        episodePlayAllAction = playAll
-        episodeShuffleAllAction = shuffleAll
-        addView(
-            playAll,
-            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height))
-        )
-        addView(
-            shuffleAll,
-            LinearLayout.LayoutParams(-2, requireContext().dim(R.dimen.tv_details_action_height)).apply {
-                marginStart = requireContext().dim(R.dimen.tv_spacing_small)
-            }
-        )
-    }
-
     private fun clearEpisodeShelf() {
         releaseShelf(episodeList)
         episodeList = null
-        episodePlayAllAction = null
-        episodeShuffleAllAction = null
         episodesContainer.removeAllViews()
     }
 
@@ -1488,6 +1546,9 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         relatedContainer.visibility = View.GONE
         pendingEpisodeFocusSeasonId = null
         pendingActionSeasonFocus = false
+        currentSeasonEpisodes = emptyList()
+        episodePlayAllAction = null
+        episodeShuffleAllAction = null
     }
 
     private fun loadRelated(item: MediaItem, generation: Int) {
@@ -1539,7 +1600,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
 
-    private fun requestFirstSeasonOrSecondary(previous: View): Boolean {
+    private fun requestFirstSeasonOrSecondary(): Boolean {
         val seasonTarget = firstFocusableChild(seasonList)
         val relatedTarget = firstFocusableChild(relatedList)
         val decision = ActionSecondaryFocusPolicy.decide(
@@ -1581,39 +1642,17 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
 
-    private fun requestEpisodesForSeason(
-        series: MediaItem,
-        season: MediaItem,
-        generation: Int
-    ): Boolean {
-        if (currentSeasonId != season.id) {
-            selectSeason(series, season, generation, true)
+    private fun requestSeasonEpisodeRow(seasonId: String): Boolean {
+        val target = firstFocusableChild(episodeList)
+        if (target?.requestFocus() == true) {
+            scrollEpisodesIntoView()
             return true
         }
-        episodePlayAllAction?.takeIf { it.isShown && it.isFocusable }?.let { playAll ->
-            if (playAll.requestFocus()) {
-                scrollEpisodesIntoView()
-                return true
-            }
+        if (!episodesSettled) {
+            pendingEpisodeFocusSeasonId = seasonId
+            return true
         }
-        val target = firstFocusableChild(episodeList)
-        return when (
-            SeasonEpisodeEntryPolicy.decide(
-                hasFocusableEpisode = target != null,
-                episodesLoading = !episodesSettled
-            )
-        ) {
-            SeasonEpisodeEntryDecision.MOVE_TO_EPISODES -> {
-                val moved = target?.requestFocus() == true
-                if (moved) scrollEpisodesIntoView()
-                moved
-            }
-            SeasonEpisodeEntryDecision.WAIT_FOR_EPISODES -> {
-                pendingEpisodeFocusSeasonId = season.id
-                true
-            }
-            SeasonEpisodeEntryDecision.PASS_THROUGH -> false
-        }
+        return false
     }
 
     private fun schedulePendingEpisodeFocus(seasonId: String) {
@@ -1654,8 +1693,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
 
     private inner class SeasonAdapter(
         private val series: MediaItem,
-        private val seasons: List<MediaItem>,
-        private val generation: Int
+        private val seasons: List<MediaItem>
     ) : RecyclerView.Adapter<MediaCardHolder>() {
         override fun getItemCount(): Int = seasons.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
@@ -1663,11 +1701,14 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val season = seasons[position]
             MediaCardFactory.bindView(holder, season, MediaCardPresentation.POSTER, session, api)
-            holder.itemView.setOnClickListener { selectSeason(series, season, generation, true) }
-            holder.itemView.setOnKeyListener { _, keyCode, event ->
-                event.action == KeyEvent.ACTION_DOWN &&
-                    keyCode == KeyEvent.KEYCODE_DPAD_DOWN &&
-                    requestEpisodesForSeason(series, season, generation)
+            holder.itemView.setOnClickListener {
+                if (
+                    SeasonDetailsNavigationPolicy.clickDecision(series, season) ==
+                    SeasonDetailsClickDecision.OPEN_DETAILS
+                ) {
+                    currentSeasonId = season.id
+                    openNestedDetails(SeasonDetailsNavigationPolicy.routeItem(series, season))
+                }
             }
         }
 
@@ -1845,12 +1886,22 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun metadataText(item: MediaItem): String {
-        val runtime = item.runtimeTicks.takeIf {
-            it > 0L &&
-                !item.type.equals("Series", ignoreCase = true) &&
-                !item.type.equals("Movie", ignoreCase = true)
-        }?.let { "${it / 10_000_000L / 60L} min" }
-        return TextSanitizer.formatMetadata(item.productionYear ?: item.year, item.officialRating, runtime)
+        val durationOrCount = if (item.type.equals("Season", ignoreCase = true)) {
+            (item.episodeCount ?: item.childCount ?: item.recursiveItemCount)
+                ?.takeIf { it >= 0 }
+                ?.let { count -> "$count ${if (count == 1) "episode" else "episodes"}" }
+        } else {
+            item.runtimeTicks.takeIf {
+                it > 0L &&
+                    !item.type.equals("Series", ignoreCase = true) &&
+                    !item.type.equals("Movie", ignoreCase = true)
+            }?.let { "${it / 10_000_000L / 60L} min" }
+        }
+        return TextSanitizer.formatMetadata(
+            item.productionYear ?: item.year,
+            item.officialRating,
+            durationOrCount
+        )
     }
 
     private fun textView(value: String, @DimenRes size: Int, color: Int, bold: Boolean = false) = TextView(requireContext()).apply {

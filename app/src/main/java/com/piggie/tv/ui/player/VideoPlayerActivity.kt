@@ -56,6 +56,7 @@ import com.piggie.tv.data.playback.PlaybackTrackRouteResultPolicy
 import com.piggie.tv.data.playback.PlaybackTrackType
 import com.piggie.tv.data.playback.PlaybackSubtitleSidecarPolicy
 import com.piggie.tv.data.playback.SeasonPlaybackMode
+import com.piggie.tv.data.playback.SeasonPlaybackQueueHandoff
 import com.piggie.tv.data.playback.SeasonPlaybackQueuePolicy
 import com.piggie.tv.data.playback.SubtitleSelectionMode
 import com.piggie.tv.data.playback.UP_NEXT_THRESHOLD_MS
@@ -112,6 +113,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var currentItem: com.piggie.tv.data.models.MediaItem? = null
     private var nextEpisode: com.piggie.tv.data.models.MediaItem? = null
     private var explicitEpisodeQueue: List<String> = emptyList()
+    private var explicitEpisodeItems: Map<String, com.piggie.tv.data.models.MediaItem> = emptyMap()
     private var nextLookupInFlight = false
     private var nextLookupCompleted = false
     private var upNextOverlay: View? = null
@@ -223,6 +225,7 @@ class VideoPlayerActivity : AppCompatActivity() {
             ?.filter(String::isNotEmpty)
             ?.distinct()
             .orEmpty()
+        explicitEpisodeItems = SeasonPlaybackQueueHandoff.itemsFor(explicitEpisodeQueue)
         audioIndex = intent.getIntExtra(EXTRA_AUDIO_INDEX, -1).takeIf { it != -1 }
         subtitleIndex = intent.getIntExtra(EXTRA_SUBTITLE_INDEX, -1).takeIf { it != -1 }
         subtitleMode = intent.getStringExtra(EXTRA_SUBTITLE_MODE)
@@ -869,9 +872,24 @@ class VideoPlayerActivity : AppCompatActivity() {
             drainNextCallbacks(null)
             return
         }
+        val launchNext = SeasonPlaybackQueuePolicy.resolveNext(
+            queue = explicitEpisodeQueue,
+            currentItemId = lookupForId,
+            hydratedItem = null,
+            launchItems = explicitEpisodeItems
+        )
+        if (launchNext != null) {
+            completeNextEpisodeLookup(
+                lookupForId = lookupForId,
+                explicitNextId = explicitNextId,
+                next = launchNext,
+                resolution = "season_launch_item"
+            )
+            return
+        }
         val generation = requestGeneration.get()
         launchApiWork(WORK_NEXT_LOOKUP, "ptv-next-episode") {
-            val next = runCatching {
+            val hydrated = runCatching {
                 explicitNextId?.let { api.loadItem(session, it) }
                     ?: api.loadNextEpisode(session, current)
             }
@@ -881,30 +899,61 @@ class VideoPlayerActivity : AppCompatActivity() {
                     }
                 }
                 .getOrNull()
+            val next = if (explicitNextId != null) {
+                SeasonPlaybackQueuePolicy.resolveNext(
+                    queue = explicitEpisodeQueue,
+                    currentItemId = lookupForId,
+                    hydratedItem = hydrated,
+                    launchItems = explicitEpisodeItems
+                )
+            } else {
+                hydrated
+            }
             runOnUiThread {
                 if (
                     destroyed ||
                     generation != requestGeneration.get() ||
                     currentItem?.id != lookupForId
                 ) return@runOnUiThread
-                nextLookupInFlight = false
-                nextLookupCompleted = true
-                nextEpisode = next
-                if (explicitNextId != null && next != null) {
-                    // Reuse the fully hydrated queued item during transition instead of loading it twice.
-                    MediaDetailsSeedStore.put(next)
-                }
-                PTVLog.i("Next episode decision current=${PTVLog.mask(lookupForId)} next=${PTVLog.mask(next?.id)}")
-                PtvDiagnosticsManager.recordPlayback(
-                    PtvPlaybackTrace(
-                        itemId = lookupForId,
-                        event = "next_episode_decision",
-                        detail = if (next == null) "no next episode" else "next=${PTVLog.mask(next.id)} autoplay=${settings.autoplayNextEpisode} canceled=$autoplayCanceled"
-                    )
+                completeNextEpisodeLookup(
+                    lookupForId = lookupForId,
+                    explicitNextId = explicitNextId,
+                    next = next,
+                    resolution = if (hydrated != null) "server_metadata" else "unresolved"
                 )
-                drainNextCallbacks(next)
             }
         }
+    }
+
+    private fun completeNextEpisodeLookup(
+        lookupForId: String,
+        explicitNextId: String?,
+        next: com.piggie.tv.data.models.MediaItem?,
+        resolution: String
+    ) {
+        nextLookupInFlight = false
+        nextLookupCompleted = true
+        nextEpisode = next
+        if (explicitNextId != null && next != null) {
+            MediaDetailsSeedStore.put(next)
+        }
+        PTVLog.i(
+            "Next episode decision current=${PTVLog.mask(lookupForId)} " +
+                "next=${PTVLog.mask(next?.id)} resolution=$resolution"
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = lookupForId,
+                event = "next_episode_decision",
+                detail = if (next == null) {
+                    "no next episode resolution=$resolution"
+                } else {
+                    "next=${PTVLog.mask(next.id)} resolution=$resolution " +
+                        "autoplay=${settings.autoplayNextEpisode} canceled=$autoplayCanceled"
+                }
+            )
+        )
+        drainNextCallbacks(next)
     }
 
     private fun drainNextCallbacks(next: com.piggie.tv.data.models.MediaItem?) {
@@ -1777,6 +1826,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                 if (shuffle) SeasonPlaybackMode.SHUFFLE_ALL else SeasonPlaybackMode.PLAY_ALL
             )
             val firstItemId = queue.firstOrNull() ?: return false
+            SeasonPlaybackQueueHandoff.publish(queue, episodes)
             context.startActivity(Intent(context, VideoPlayerActivity::class.java).apply {
                 putExtra(EXTRA_ITEM_ID, firstItemId)
                 putExtra(EXTRA_START_TICKS, 0L)

@@ -95,6 +95,164 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `season card click opens a normalized nested season destination`() {
+        val series = item("series", "Series").copy(
+            title = "Piggie Show",
+            imageTag = "series-primary",
+            logoTag = "series-logo",
+            thumbImageTag = "series-thumb",
+            backdropImageTags = listOf("series-backdrop")
+        )
+        val season = item("season-2", "Season").copy(
+            title = "Season 2",
+            imageTag = "season-primary",
+            seriesId = "stale-parent",
+            seriesName = " ",
+            parentLogoImageTag = " ",
+            parentBackdropImageTags = listOf("", "  ")
+        )
+
+        assertEquals(
+            SeasonDetailsClickDecision.OPEN_DETAILS,
+            SeasonDetailsNavigationPolicy.clickDecision(series, season)
+        )
+        val opened = SeasonDetailsNavigationPolicy.routeItem(series, season)
+
+        assertEquals("season-2", opened.id)
+        assertEquals("Season", opened.type)
+        assertEquals("season-primary", opened.imageTag)
+        assertEquals("series", opened.seriesId)
+        assertEquals("Piggie Show", opened.seriesName)
+        assertEquals("series", opened.parentPrimaryImageItemId)
+        assertEquals("series-primary", opened.parentPrimaryImageTag)
+        assertEquals("series", opened.parentLogoItemId)
+        assertEquals("series-logo", opened.parentLogoImageTag)
+        assertEquals("series", opened.parentThumbItemId)
+        assertEquals("series-thumb", opened.parentThumbImageTag)
+        assertEquals("series", opened.parentBackdropItemId)
+        assertEquals(listOf("series-backdrop"), opened.parentBackdropImageTags)
+        assertEquals("series-primary", opened.seriesPrimaryImageTag)
+    }
+
+    @Test
+    fun `invalid season card pairs cannot open nested details`() {
+        val series = item("series", "Series")
+
+        listOf(
+            series to item("episode", "Episode"),
+            item("not-a-series", "Movie") to item("season", "Season"),
+            series to item(" ", "Season"),
+            series to item("series", "Season")
+        ).forEach { (candidateSeries, candidateSeason) ->
+            assertEquals(
+                SeasonDetailsClickDecision.IGNORE,
+                SeasonDetailsNavigationPolicy.clickDecision(candidateSeries, candidateSeason)
+            )
+            assertEquals(
+                candidateSeason,
+                SeasonDetailsNavigationPolicy.routeItem(candidateSeries, candidateSeason)
+            )
+        }
+    }
+
+    @Test
+    fun `season details resolve their parent series destination`() {
+        assertEquals(
+            "series",
+            EpisodeSeriesNavigationPolicy.seriesId(
+                item("season", "Season").copy(seriesId = "  series  ")
+            )
+        )
+        assertEquals(
+            "series",
+            EpisodeSeriesNavigationPolicy.seriesId(
+                item("episode", "Episode").copy(seriesId = "series")
+            )
+        )
+        assertNull(
+            EpisodeSeriesNavigationPolicy.seriesId(
+                item("season", "Season").copy(seriesId = "season")
+            )
+        )
+        assertNull(
+            EpisodeSeriesNavigationPolicy.seriesId(
+                item("movie", "Movie").copy(seriesId = "series")
+            )
+        )
+    }
+
+    @Test
+    fun `season route loads only its episodes as nested secondary content`() {
+        val season = SeasonDetailsNavigationPolicy.routeItem(
+            item("series", "Series"),
+            item("season-3", "Season")
+        )
+
+        assertEquals(
+            DetailsSecondaryLoadDecision(
+                kind = DetailsSecondaryLoadKind.SEASON_EPISODES,
+                seriesId = "series",
+                seasonId = "season-3"
+            ),
+            DetailsSecondaryLoadingPolicy.decide(season)
+        )
+        assertEquals(
+            DetailsSecondaryLoadDecision(
+                kind = DetailsSecondaryLoadKind.SERIES_SEASONS,
+                seriesId = "series"
+            ),
+            DetailsSecondaryLoadingPolicy.decide(item("series", "Series"))
+        )
+        assertEquals(
+            DetailsSecondaryLoadDecision(DetailsSecondaryLoadKind.RELATED_ONLY),
+            DetailsSecondaryLoadingPolicy.decide(item("movie", "Movie"))
+        )
+        assertEquals(
+            DetailsSecondaryLoadDecision(
+                kind = DetailsSecondaryLoadKind.SEASON_EPISODES,
+                seasonId = "orphan-season"
+            ),
+            DetailsSecondaryLoadingPolicy.decide(item("orphan-season", "Season"))
+        )
+    }
+
+    @Test
+    fun `season containers never request video track metadata`() {
+        assertFalse(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("series", "Series")))
+        assertFalse(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("season", "Season")))
+        assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("movie", "Movie")))
+        assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("episode", "Episode")))
+        assertTrue(DetailsPlaybackMetadataPolicy.needsVideoTracks(item("video", "Video")))
+    }
+
+    @Test
+    fun `full season details retain normalized nested route metadata`() {
+        val seed = SeasonDetailsNavigationPolicy.routeItem(
+            item("series", "Series").copy(
+                title = "Piggie Show",
+                logoTag = "series-logo"
+            ),
+            item("season", "Season").copy(
+                childCount = 8,
+                episodeCount = 8,
+                recursiveItemCount = 8
+            )
+        )
+        val full = item("season", "Season").copy(overview = "Full season overview")
+
+        val merged = DetailsNavigationMetadataPolicy.merge(seed, full)
+
+        assertEquals("series", merged.seriesId)
+        assertEquals("Piggie Show", merged.seriesName)
+        assertEquals("series", merged.parentLogoItemId)
+        assertEquals("series-logo", merged.parentLogoImageTag)
+        assertEquals(8, merged.childCount)
+        assertEquals(8, merged.episodeCount)
+        assertEquals(8, merged.recursiveItemCount)
+        assertEquals("Full season overview", merged.overview)
+    }
+
+    @Test
     fun `full episode details retain navigation metadata omitted by the server`() {
         val seed = item("episode", "Episode").copy(
             seriesId = "series",
@@ -237,100 +395,6 @@ class DetailsPoliciesTest {
         } finally {
             MediaDetailsSeedStore.clear()
         }
-    }
-
-    @Test
-    fun `season focus graph is deterministic`() {
-        assertTrue(
-            DetailsInitialFocusPolicy.shouldRequestPrimary(
-                hasFocusInsideDetails = false
-            )
-        )
-        assertFalse(
-            DetailsInitialFocusPolicy.shouldRequestPrimary(
-                hasFocusInsideDetails = true
-            )
-        )
-        assertEquals(
-            DetailsFocusRegion.SEASONS,
-            SeasonFocusPolicy.target(
-                DetailsFocusRegion.ACTIONS,
-                DetailsFocusDirection.DOWN,
-                hasSeasons = true
-            )
-        )
-        assertEquals(
-            DetailsFocusRegion.EPISODES,
-            SeasonFocusPolicy.target(
-                DetailsFocusRegion.SEASONS,
-                DetailsFocusDirection.DOWN,
-                hasSeasons = true
-            )
-        )
-        assertEquals(
-            DetailsFocusRegion.SEASONS,
-            SeasonFocusPolicy.target(
-                DetailsFocusRegion.EPISODES,
-                DetailsFocusDirection.UP,
-                hasSeasons = true
-            )
-        )
-        assertNull(
-            SeasonFocusPolicy.target(
-                DetailsFocusRegion.ACTIONS,
-                DetailsFocusDirection.DOWN,
-                hasSeasons = false
-            )
-        )
-        assertEquals(
-            SeasonEpisodeEntryDecision.WAIT_FOR_EPISODES,
-            SeasonEpisodeEntryPolicy.decide(
-                hasFocusableEpisode = false,
-                episodesLoading = true
-            )
-        )
-        assertEquals(
-            SeasonEpisodeEntryDecision.MOVE_TO_EPISODES,
-            SeasonEpisodeEntryPolicy.decide(
-                hasFocusableEpisode = true,
-                episodesLoading = true
-            )
-        )
-        assertEquals(
-            SeasonEpisodeEntryDecision.PASS_THROUGH,
-            SeasonEpisodeEntryPolicy.decide(
-                hasFocusableEpisode = false,
-                episodesLoading = false
-            )
-        )
-    }
-
-    @Test
-    fun `explicit season selection enters episodes while initial loading preserves focus`() {
-        assertEquals(
-            SeasonSelectionDecision.LOAD_WITHOUT_MOVING_FOCUS,
-            SeasonSelectionPolicy.decide(
-                userInitiated = false,
-                isCurrentSeason = false,
-                hasFocusableEpisode = false
-            )
-        )
-        assertEquals(
-            SeasonSelectionDecision.LOAD_AND_FOCUS_EPISODES,
-            SeasonSelectionPolicy.decide(
-                userInitiated = true,
-                isCurrentSeason = false,
-                hasFocusableEpisode = true
-            )
-        )
-        assertEquals(
-            SeasonSelectionDecision.FOCUS_LOADED_EPISODES,
-            SeasonSelectionPolicy.decide(
-                userInitiated = true,
-                isCurrentSeason = true,
-                hasFocusableEpisode = true
-            )
-        )
     }
 
     @Test
