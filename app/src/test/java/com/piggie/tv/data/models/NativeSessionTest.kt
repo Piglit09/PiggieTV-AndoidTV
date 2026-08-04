@@ -7,11 +7,11 @@ import org.junit.Test
 
 class NativeSessionTest {
     @Test
-    fun completeSessionRequiresHttpsPiggieTvContext() {
+    fun completeSessionRequiresValidHttpServerContext() {
         val session = NativeSession("token", "server", "user", "Piggie", "https://piggietv.com")
         assertTrue(session.isComplete())
         assertFalse(session.copy(token = "").isComplete())
-        assertFalse(session.copy(serverUrl = "http://10.16.0.50:8096").isComplete())
+        assertTrue(session.copy(serverUrl = "http://10.16.0.50:8096").isComplete())
     }
 
     @Test
@@ -38,7 +38,8 @@ class NativeSessionTest {
 
     @Test
     fun testServerUrlProtocolCheck() {
-        val session = NativeSession("t", "s", "u", "n", "http://insecure.com")
-        assertFalse(session.isComplete()) // Requires HTTPS
+        assertTrue(NativeSession("t", "s", "u", "n", "http://10.0.0.2:8096").isComplete())
+        assertFalse(NativeSession("t", "s", "u", "n", "ftp://insecure.example").isComplete())
+        assertFalse(NativeSession("t", "s", "u", "n", "not a url").isComplete())
     }
 }

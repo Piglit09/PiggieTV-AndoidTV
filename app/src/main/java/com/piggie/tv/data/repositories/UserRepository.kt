@@ -4,6 +4,7 @@ import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
 
 class UserRepository(
@@ -19,6 +20,7 @@ class UserRepository(
     }
 
     fun signOut() {
+        MusicPlaybackManager.shutdown()
         store.clear()
         DiscoveryManager.clearForLogout()
         MediaDetailsSeedStore.clear()

@@ -122,6 +122,13 @@ internal class PlaybackStopReportState {
             Status.COMPLETE
         )
     }
+
+    fun failed(report: PlaybackStopReport) {
+        sessions.remove(
+            SessionKey(report.itemId, report.playSessionId),
+            Status.IN_FLIGHT
+        )
+    }
 }
 
 /**

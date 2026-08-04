@@ -21,6 +21,13 @@ class NextEpisodeAutoplayTest {
     @Test fun countdownShowsInsideThreshold() {
         assertTrue(NextEpisodeAutoplayPolicy.shouldShowOverlay(20_000, guards(), false))
         assertFalse(NextEpisodeAutoplayPolicy.shouldShowOverlay(30_000, guards(), false))
+        assertFalse(
+            NextEpisodeAutoplayPolicy.shouldShowOverlay(
+                20_000,
+                guards(foreground = false),
+                false
+            )
+        )
     }
 
     @Test fun cancelPreventsCountdownAndEndedFallback() {
@@ -31,6 +38,12 @@ class NextEpisodeAutoplayTest {
     @Test fun playNowBypassesDisabledSettingButNotSafetyGuards() {
         assertTrue(NextEpisodeAutoplayPolicy.shouldStart(AutoplayTrigger.PLAY_NOW, guards(enabled = false)))
         assertFalse(NextEpisodeAutoplayPolicy.shouldStart(AutoplayTrigger.PLAY_NOW, guards(error = true)))
+        assertFalse(
+            NextEpisodeAutoplayPolicy.shouldStart(
+                AutoplayTrigger.PLAY_NOW,
+                guards(foreground = false)
+            )
+        )
     }
 
     @Test fun endedFallbackStartsAndDuplicateCallbackDoesNot() {

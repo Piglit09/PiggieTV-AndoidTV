@@ -17,6 +17,7 @@ import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.navigation.NativeRoute
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
@@ -84,6 +85,7 @@ class ProfileFragment : Fragment() {
             setBackgroundResource(R.drawable.tv_button_secondary)
             setTextColor(context.getColor(R.color.tv_text_primary))
             setOnClickListener { 
+                MusicPlaybackManager.shutdown()
                 store.clear()
                 DiscoveryManager.clearForLogout()
                 MediaDetailsSeedStore.clear()

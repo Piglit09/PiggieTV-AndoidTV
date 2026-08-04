@@ -24,6 +24,30 @@ object PlaybackUrlQuery {
         }
     }
 
+    /** Returns the first query value whose name matches case-insensitively. */
+    fun get(url: String, name: String): String? {
+        val absoluteUrl = url.toHttpUrlOrNull()
+        if (absoluteUrl != null) {
+            for (index in 0 until absoluteUrl.querySize) {
+                if (absoluteUrl.queryParameterName(index).equals(name, ignoreCase = true)) {
+                    return absoluteUrl.queryParameterValue(index)
+                }
+            }
+            return null
+        }
+
+        val withoutFragment = url.substringBefore('#')
+        val query = withoutFragment.substringAfter('?', missingDelimiterValue = "")
+        if (query.isEmpty()) return null
+        splitQuery(query).forEach { component ->
+            val encodedName = component.substringBefore('=')
+            if (decodeName(encodedName).equals(name, ignoreCase = true)) {
+                return decodeValue(component.substringAfter('=', missingDelimiterValue = ""))
+            }
+        }
+        return null
+    }
+
     private fun setAbsolute(url: HttpUrl, name: String, value: String): String {
         val parameters = (0 until url.querySize).map { index ->
             QueryParameter(
@@ -100,6 +124,11 @@ object PlaybackUrlQuery {
             .build()
         return parsed.queryParameterName(0)
     }
+
+    private fun decodeValue(encodedValue: String): String? = encodingBase.newBuilder()
+        .encodedQuery("value=$encodedValue")
+        .build()
+        .queryParameter("value")
 
     private fun splitQuery(query: String): List<String> {
         val components = mutableListOf<String>()

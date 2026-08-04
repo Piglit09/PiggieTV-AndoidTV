@@ -1,7 +1,10 @@
 package com.piggie.tv.data.playback
 
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.api.JellyfinPlaybackMetadataParser
+import com.piggie.tv.data.models.AudioTrack
 import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.models.SubtitleTrack
 import com.piggie.tv.data.session.NativeSettings
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
@@ -18,7 +21,9 @@ data class PlaybackStream(
     val height: Int? = null,
     val bitrate: Long? = null,
     val connectionSpeed: String = ConnectionSpeed.AUTO.wireValue,
-    val negotiatedMaxBitrate: Int = ConnectionSpeed.AUTO_NEGOTIATION_BITRATE
+    val negotiatedMaxBitrate: Int = ConnectionSpeed.AUTO_NEGOTIATION_BITRATE,
+    val audioTracks: List<AudioTrack> = emptyList(),
+    val subtitleTracks: List<SubtitleTrack> = emptyList()
 )
 
 enum class PlaybackRoute {
@@ -103,7 +108,8 @@ class PlaybackNegotiator(
         positionTicks: Long,
         audioIndex: Int? = null,
         subtitleIndex: Int? = null,
-        preferredMediaSourceId: String? = null
+        preferredMediaSourceId: String? = null,
+        forceTranscode: Boolean = false
     ): PlaybackStream {
         val connectionSpeed = ConnectionSpeed.fromStored(settings.connectionSpeed)
         val maxBitrate = connectionSpeed.negotiationBitrate()
@@ -119,7 +125,9 @@ class PlaybackNegotiator(
                 mediaSourceId = preferredMediaSourceId.takeIf {
                     audioIndex != null || subtitleIndex != null
                 },
-                startTimeTicks = positionTicks,
+                // Keep one authoritative, absolute player timeline. Server-trimmed VOD streams
+                // start Media3 at zero and break the seekbar as well as backward seeking.
+                startTimeTicks = 0L,
                 audioStreamIndex = audioIndex,
                 subtitleStreamIndex = subtitleIndex
             )
@@ -141,7 +149,8 @@ class PlaybackNegotiator(
             preferredMediaSourceId = preferredMediaSourceId,
             audioStreamIndex = audioIndex,
             subtitleStreamIndex = subtitleIndex,
-            maxAllowedBitrate = connectionSpeed.maxBitrate?.toLong()
+            maxAllowedBitrate = connectionSpeed.maxBitrate?.toLong(),
+            forceTranscode = forceTranscode
         )
         if (plans.isEmpty()) throw IllegalStateException("No playable media sources found")
 
@@ -195,6 +204,10 @@ class PlaybackNegotiator(
         val audio = audioStreams.firstOrNull { it.optInt("Index", -1) == audioIndex }
             ?: audioStreams.firstOrNull { it.optBoolean("IsDefault", false) }
             ?: audioStreams.firstOrNull()
+        val selectedTracks = JellyfinPlaybackMetadataParser.parseSource(
+            info.optJSONArray("MediaSources"),
+            sourceId
+        )
         fun playbackStream(url: String, method: String) = PlaybackStream(
             url = url,
             method = method,
@@ -207,23 +220,36 @@ class PlaybackNegotiator(
             height = video?.optInt("Height", 0)?.takeIf { it > 0 },
             bitrate = source.optLong("Bitrate", 0L).takeIf { it > 0 },
             connectionSpeed = connectionSpeed.wireValue,
-            negotiatedMaxBitrate = maxBitrate
+            negotiatedMaxBitrate = maxBitrate,
+            audioTracks = selectedTracks?.audioTracks.orEmpty(),
+            subtitleTracks = selectedTracks?.subtitleTracks.orEmpty()
         )
 
         if (plan.route == PlaybackRoute.DIRECT_PLAY) {
-            val url = PlaybackUrlQuery.set(
+            var url = PlaybackUrlQuery.set(
                 session.serverUrl + "/Videos/" + itemId + "/stream?Static=true",
                 "MediaSourceId",
                 sourceId
             )
+            if (playSessionId.isNotBlank()) {
+                url = PlaybackUrlQuery.set(url, "PlaySessionId", playSessionId)
+            }
             return playbackStream(url, "DirectPlay")
         }
 
         if (plan.route == PlaybackRoute.DIRECT_STREAM) {
-            var url = source.optString("DirectStreamUrl").takeIf(String::isNotBlank)
+            // Jellyfin represents remux/direct-stream playback with TranscodingUrl. There is no
+            // DirectStreamUrl on the standard MediaSourceInfo contract. Preserve the server URL's
+            // container/copy/start parameters instead of synthesizing an incomplete remux request.
+            var url = source.optString("TranscodingUrl").takeIf(String::isNotBlank)
                 ?.let { absoluteUrl(session, it) }
-                ?: session.serverUrl + "/Videos/" + itemId + "/stream?Static=false"
+                ?: source.optString("DirectStreamUrl").takeIf(String::isNotBlank)
+                ?.let { absoluteUrl(session, it) }
+                ?: throw IllegalStateException("Jellyfin did not provide a direct-stream URL")
             url = PlaybackUrlQuery.set(url, "MediaSourceId", sourceId)
+            if (playSessionId.isNotBlank()) {
+                url = PlaybackUrlQuery.set(url, "PlaySessionId", playSessionId)
+            }
             audioIndex?.let { url = PlaybackUrlQuery.set(url, "AudioStreamIndex", it.toString()) }
             subtitleIndex?.let { url = PlaybackUrlQuery.set(url, "SubtitleStreamIndex", it.toString()) }
             return playbackStream(url, "DirectStream")
@@ -268,14 +294,14 @@ class PlaybackNegotiator(
                 }
             }
         }
+        val hasDirectStreamUrl = optString("TranscodingUrl").isNotBlank() ||
+            optString("DirectStreamUrl").isNotBlank()
         return PlaybackMediaSourceCandidate(
             id = sourceId,
             sourceIndex = sourceIndex,
             supportsDirectPlay = optBoolean("SupportsDirectPlay", false),
-            supportsDirectStream = optBoolean(
-                "SupportsDirectStream",
-                optString("DirectStreamUrl").isNotBlank()
-            ),
+            supportsDirectStream = optBoolean("SupportsDirectStream", hasDirectStreamUrl) &&
+                hasDirectStreamUrl,
             supportsTranscoding = optBoolean(
                 "SupportsTranscoding",
                 optString("TranscodingUrl").isNotBlank()

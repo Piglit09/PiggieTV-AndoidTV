@@ -194,6 +194,19 @@ class PlayerControlsTest {
     }
 
     @Test
+    fun `failed stop report can be claimed for retry`() {
+        val state = PlaybackStopReportState()
+        val first = state.begin("movie-1", "session-1", 123L)
+            as PlaybackStopReportDecision.Claimed
+
+        state.failed(first.report)
+
+        val retry = state.begin("movie-1", "session-1", 456L)
+            as PlaybackStopReportDecision.Claimed
+        assertEquals(456L, retry.report.positionTicks)
+    }
+
+    @Test
     fun `dialog timeout chain preserves baseline and rejects stale restoration`() {
         val state = PlayerDialogTimeoutState()
         val firstDialog = state.begin(currentTimeoutMs = 5_000)

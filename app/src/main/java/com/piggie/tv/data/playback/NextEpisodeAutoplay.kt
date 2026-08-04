@@ -49,6 +49,7 @@ object NextEpisodeAutoplayPolicy {
     ): Boolean = remainingMs in 1..UP_NEXT_THRESHOLD_MS &&
         state.enabled &&
         state.hasNextItem &&
+        state.appForeground &&
         !state.canceled &&
         !state.playbackError &&
         !overlayAlreadyShown
@@ -57,7 +58,7 @@ object NextEpisodeAutoplayPolicy {
         if (!state.hasNextItem || state.playbackError || state.manuallyStoppedEarly || state.transitionAlreadyStarted) {
             return false
         }
-        if (trigger == AutoplayTrigger.PLAY_NOW) return true
+        if (trigger == AutoplayTrigger.PLAY_NOW) return state.appForeground
         return state.enabled && !state.canceled && state.appForeground
     }
 }

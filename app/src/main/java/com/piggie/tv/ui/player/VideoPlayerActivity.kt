@@ -24,6 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.C
@@ -32,7 +33,11 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.piggie.tv.R
@@ -73,6 +78,7 @@ import com.piggie.tv.util.PTVLog
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import okhttp3.OkHttpClient
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -84,6 +90,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val store by lazy { SecureSessionStore(this) }
     private val settings by lazy { NativeSettings(this) }
     private val negotiator by lazy { PlaybackNegotiator(api, settings) }
+    private val reportingApi by lazy { JellyfinNativeApi(applicationContext) }
 
     private lateinit var session: NativeSession
     private lateinit var itemId: String
@@ -132,6 +139,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var autoplayCanceled = false
     private var playbackError = false
     private var activityForeground = false
+    private var playbackRequested = true
     @Volatile private var userExitRequested = false
     private var destroyed = false
     private var lastKnownPositionMs = 0L
@@ -140,6 +148,9 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var pendingTrackRouteChange: Runnable? = null
     private var trackSelectionGeneration = 0
     private var sidecarFallbackAttemptedSelection: TrackSelectionSnapshot? = null
+    private var failedSubtitleLoadUri: String? = null
+    private var failedSubtitleLoadAtMs = 0L
+    private var transcodeFallbackAttempted = false
 
     private var audioIndex: Int? = null
     private var subtitleIndex: Int? = null
@@ -352,14 +363,22 @@ class VideoPlayerActivity : AppCompatActivity() {
             .build()
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(OkHttpDataSource.Factory(client))
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
 
-        player = ExoPlayer.Builder(this)
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
+            .setSeekBackIncrementMs(SEEK_BACK_INCREMENT_MS)
+            .setSeekForwardIncrementMs(SEEK_FORWARD_INCREMENT_MS)
             .build()
         playerView.player = player
-        mediaSession = MediaSession.Builder(this, player)
-            .setId(VIDEO_MEDIA_SESSION_ID)
-            .build()
+        createMediaSessionIfNeeded()
         PtvDiagnosticsManager.routeRequested("player")
         PtvDiagnosticsManager.recordPlayback(PtvPlaybackTrace(itemId = itemId, event = "player_created"))
 
@@ -376,7 +395,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                     Player.STATE_READY -> {
                         statusView.isVisible = false
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
-                        startProgressLoops()
+                        if (activityForeground) startProgressLoops()
                         PtvDiagnosticsManager.routeVisible("player", "player_view")
                         PtvDiagnosticsManager.routeInteractive("player", "player_view")
                         PtvDiagnosticsManager.recordPlayback(
@@ -397,8 +416,29 @@ class VideoPlayerActivity : AppCompatActivity() {
                 )
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (
+                    reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST &&
+                    activityForeground &&
+                    !transitionInFlight.get()
+                ) {
+                    playbackRequested = playWhenReady
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && activityForeground) {
+                    startProgressLoops()
+                } else if (!activityForeground) {
+                    stopProgressLoops()
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
+                // Retry from the failure position, not the last 15-second reporting sample.
+                lastKnownPositionMs = playbackPositionMs()
                 if (attemptExternalSubtitleServerFallback(error)) return
+                if (attemptTranscodeFallback(error)) return
                 playbackError = true
                 stopProgressLoops()
                 PTVLog.e("Player error item=${PTVLog.mask(itemId)} code=${error.errorCodeName}", error)
@@ -408,19 +448,45 @@ class VideoPlayerActivity : AppCompatActivity() {
                 showStatus("Playback error. Press Select to retry or Back to exit.")
             }
         })
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: IOException,
+                wasCanceled: Boolean
+            ) {
+                val failedUri = loadEventInfo.uri.toString()
+                if (failedUri == selectedExternalSubtitleUrl()) {
+                    failedSubtitleLoadUri = failedUri
+                    failedSubtitleLoadAtMs = SystemClock.elapsedRealtime()
+                }
+            }
+        })
+    }
+
+    private fun createMediaSessionIfNeeded() {
+        if (mediaSession != null || destroyed || !::player.isInitialized) return
+        mediaSession = MediaSession.Builder(this, player)
+            .setId(VIDEO_MEDIA_SESSION_ID)
+            .build()
     }
 
     /** Negotiates and prepares an item on the one activity-owned ExoPlayer. */
     private fun prepareItem(
         newItemId: String,
         startTicks: Long,
-        forceServerTrackSelection: Boolean = false
+        forceServerTrackSelection: Boolean = false,
+        forceTranscode: Boolean = false
     ) {
         cancelPendingTrackRouteChange()
         cancelAllApiWork()
         val requestedAt = android.os.SystemClock.elapsedRealtime()
         val generation = requestGeneration.incrementAndGet()
         val requestedSelection = requestedTrackSelection()
+        if (!forceTranscode) transcodeFallbackAttempted = false
+        failedSubtitleLoadUri = null
+        failedSubtitleLoadAtMs = 0L
         val cachedDetails = currentItem
             ?.takeIf { it.id == newItemId && hasPlaybackTracks(it) }
             ?: MediaDetailsSeedStore.getItem(newItemId)?.takeIf(::hasPlaybackTracks)
@@ -471,7 +537,8 @@ class VideoPlayerActivity : AppCompatActivity() {
                     positionTicks = startTicks,
                     audioIndex = selectedOnServer?.audioIndex,
                     subtitleIndex = selectedOnServer?.subtitleIndex,
-                    preferredMediaSourceId = details.mediaSourceId
+                    preferredMediaSourceId = details.mediaSourceId,
+                    forceTranscode = forceTranscode
                 )
                 PreparedPlayback(details, stream, validSelection, selectedOnServer)
             }.onSuccess { prepared ->
@@ -479,9 +546,15 @@ class VideoPlayerActivity : AppCompatActivity() {
                     if (destroyed || generation != requestGeneration.get()) return@runOnUiThread
                     installPreparedPlayback(prepared, startTicks)
                     player.prepare()
-                    player.playWhenReady = true
-                    player.play()
-                    api.reportPlaying(session, newItemId, prepared.stream.playSessionId, startTicks)
+                    val shouldPlay = playbackRequested && activityForeground
+                    player.playWhenReady = shouldPlay
+                    if (shouldPlay) player.play()
+                    reportingApi.reportPlaying(
+                        session,
+                        newItemId,
+                        prepared.stream.playSessionId,
+                        startTicks
+                    )
                     PtvDiagnosticsManager.recordPlayback(
                         PtvPlaybackTrace(
                             itemId = newItemId,
@@ -524,8 +597,13 @@ class VideoPlayerActivity : AppCompatActivity() {
         item.audioTracks.isNotEmpty() || item.subtitleTracks.isNotEmpty()
 
     private fun installPreparedPlayback(prepared: PreparedPlayback, startTicks: Long) {
+        val selectedDetails = prepared.details.copy(
+            mediaSourceId = prepared.stream.mediaSourceId,
+            audioTracks = prepared.stream.audioTracks,
+            subtitleTracks = prepared.stream.subtitleTracks
+        )
         itemId = prepared.details.id
-        currentItem = prepared.details
+        currentItem = selectedDetails
         currentStream = prepared.stream
         playSessionId = prepared.stream.playSessionId
         serverTrackSelection = prepared.serverSelection
@@ -534,15 +612,15 @@ class VideoPlayerActivity : AppCompatActivity() {
         subtitleIndex = prepared.selection.subtitleIndex
         lastKnownPositionMs = startTicks / TICKS_PER_MILLISECOND
 
-        findViewById<TextView>(R.id.player_title)?.text = prepared.details.title
+        findViewById<TextView>(R.id.player_title)?.text = selectedDetails.title
         findViewById<TextView>(R.id.player_subtitle)?.text =
-            prepared.details.seriesName ?: prepared.details.year
+            selectedDetails.seriesName ?: selectedDetails.year
 
         player.setMediaItem(
-            buildPlayerMediaItem(prepared.details, prepared.stream),
+            buildPlayerMediaItem(selectedDetails, prepared.stream),
             startTicks / TICKS_PER_MILLISECOND
         )
-        loadPlaybackSkipSegments(prepared.details)
+        loadPlaybackSkipSegments(selectedDetails)
         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = false)
     }
 
@@ -664,6 +742,13 @@ class VideoPlayerActivity : AppCompatActivity() {
                 externalSubtitleUrl(itemId, stream.mediaSourceId, track)
             }
         }
+        val knownSidecarFailure = selectedSidecarUrl != null &&
+            selectedSidecarUrl == failedSubtitleLoadUri &&
+            SystemClock.elapsedRealtime() - failedSubtitleLoadAtMs <=
+                SUBTITLE_LOAD_ERROR_MATCH_WINDOW_MS
+        failedSubtitleLoadUri = null
+        failedSubtitleLoadAtMs = 0L
+        if (!knownSidecarFailure) return false
         val shouldFallback = PlaybackSubtitleSidecarPolicy.shouldAttemptServerFallback(
             hasServerSelection = serverTrackSelection != null,
             hasExplicitExternalSubtitle = selectedSubtitle?.let { track ->
@@ -692,10 +777,68 @@ class VideoPlayerActivity : AppCompatActivity() {
                 subtitleTrack = desired.subtitleIndex?.toString()
             )
         )
-        showStatus("Retrying subtitles with server compatibility modeâ€¦")
+        showStatus("Retrying subtitles with server compatibility mode...")
         requestTrackRoute(forceServerTrackSelection = true)
         return true
     }
+
+    private fun selectedExternalSubtitleUrl(): String? {
+        val selected = requestedTrackSelection()
+        val track = currentItem?.subtitleTracks?.firstOrNull {
+            selected.subtitleMode == SubtitleSelectionMode.TRACK &&
+                it.index == selected.subtitleIndex &&
+                it.isExternal &&
+                it.supportsExternalStream
+        } ?: return null
+        val stream = currentStream ?: return null
+        return externalSubtitleUrl(itemId, stream.mediaSourceId, track)
+    }
+
+    /**
+     * Jellyfin can occasionally approve direct playback that a particular TV decoder rejects.
+     * Retry once through the server's conservative HLS profile instead of looping the same route.
+     */
+    private fun attemptTranscodeFallback(error: PlaybackException): Boolean {
+        val stream = currentStream ?: return false
+        if (
+            destroyed ||
+            userExitRequested ||
+            transcodeFallbackAttempted ||
+            stream.method.equals("Transcode", ignoreCase = true)
+        ) return false
+
+        transcodeFallbackAttempted = true
+        playbackError = false
+        val resumeTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
+        stopProgressLoops()
+        reportStoppedAsyncIfNeeded()
+        PTVLog.e(
+            "Direct playback failed; retrying with server transcoding " +
+                "item=${PTVLog.mask(itemId)} code=${error.errorCodeName}",
+            error
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = itemId,
+                event = "transcode_fallback",
+                detail = error.errorCodeName,
+                playMethod = stream.method
+            )
+        )
+        showStatus("Retrying with server compatibility mode…")
+        prepareItem(
+            itemId,
+            resumeTicks,
+            forceServerTrackSelection = serverTrackSelection != null,
+            forceTranscode = true
+        )
+        return true
+    }
+
+    private fun playbackPositionMs(): Long = player.currentPosition.coerceAtLeast(0L)
+
+    private fun playerPositionMs(absolutePositionMs: Long): Long =
+        absolutePositionMs.coerceAtLeast(0L)
 
     private fun applyRequestedTrackSelection(
         tracks: Tracks,
@@ -871,8 +1014,8 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val reportRunnable = object : Runnable {
         override fun run() {
             if (destroyed) return
-            lastKnownPositionMs = player.currentPosition.coerceAtLeast(0L)
-            api.reportProgress(
+            lastKnownPositionMs = playbackPositionMs()
+            reportingApi.reportProgress(
                 session,
                 itemId,
                 playSessionId.orEmpty(),
@@ -909,7 +1052,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         val button = findViewById<Button>(R.id.player_skip_segment_btn) ?: return
         val segment = PlayerSkipSegmentPolicy.activeSegment(
             playbackSkipSegments,
-            player.currentPosition.coerceAtLeast(0L)
+            playbackPositionMs()
         )
         if (segment == null) {
             activeSkipSegment = null
@@ -931,16 +1074,20 @@ class VideoPlayerActivity : AppCompatActivity() {
     private fun skipActiveSegment() {
         val segment = PlayerSkipSegmentPolicy.activeSegment(
             playbackSkipSegments,
-            player.currentPosition.coerceAtLeast(0L)
+            playbackPositionMs()
         ) ?: run {
             inspectSkipSegment()
             return
         }
-        val targetMs = PlayerSkipSegmentPolicy.targetPositionMs(segment, player.duration) ?: return
-        if (targetMs <= player.currentPosition) return
-        player.seekTo(targetMs)
+        val metadataDurationMs = currentItem?.runtimeTicks
+            ?.div(TICKS_PER_MILLISECOND)
+            ?.takeIf { it > 0L }
+            ?: player.duration
+        val targetMs = PlayerSkipSegmentPolicy.targetPositionMs(segment, metadataDurationMs) ?: return
+        if (targetMs <= playbackPositionMs()) return
+        player.seekTo(playerPositionMs(targetMs))
         lastKnownPositionMs = targetMs
-        api.reportProgress(
+        reportingApi.reportProgress(
             session,
             itemId,
             playSessionId.orEmpty(),
@@ -964,9 +1111,12 @@ class VideoPlayerActivity : AppCompatActivity() {
         val current = currentItem ?: return
         if (!current.type.equals("Episode", ignoreCase = true)) return
         if (launchOrigin == PlaybackLaunchOrigin.CONTINUE_WATCHING) return
-        val duration = player.duration.takeIf { it > 0 } ?: (current.runtimeTicks / TICKS_PER_MILLISECOND)
+        val duration = (current.runtimeTicks / TICKS_PER_MILLISECOND)
+            .takeIf { it > 0L }
+            ?: player.duration.takeIf { it > 0 }
+            ?: return
         if (duration <= 0) return
-        val remainingMs = (duration - player.currentPosition).coerceAtLeast(0L)
+        val remainingMs = (duration - playbackPositionMs()).coerceAtLeast(0L)
         if (remainingMs <= UP_NEXT_THRESHOLD_MS + NEXT_LOOKUP_HEAD_START_MS) ensureNextEpisodeResolved()
 
         val next = nextEpisode
@@ -1196,12 +1346,13 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun restartCurrentItem() {
         if (currentItem == null || transitionInFlight.get()) return
+        playbackRequested = true
         resetNextEpisodeState()
         player.seekTo(0L)
         lastKnownPositionMs = 0L
         player.playWhenReady = true
         player.play()
-        api.reportProgress(session, itemId, playSessionId.orEmpty(), 0L, false)
+        reportingApi.reportProgress(session, itemId, playSessionId.orEmpty(), 0L, false)
         PtvDiagnosticsManager.recordPlayback(
             PtvPlaybackTrace(itemId = itemId, event = "playback_restarted")
         )
@@ -1210,7 +1361,7 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun handlePlaybackEnded() {
         stopProgressLoops()
-        lastKnownPositionMs = player.currentPosition.coerceAtLeast(0L)
+        lastKnownPositionMs = playbackPositionMs()
         val current = currentItem
         PTVLog.i(
             "Playback ended item=${PTVLog.mask(itemId)} canceled=$autoplayCanceled " +
@@ -1299,6 +1450,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         reason: String
     ) {
         if (!transitionInFlight.compareAndSet(false, true)) return
+        playbackRequested = true
 
         removeUpNextOverlay()
         stopProgressLoops()
@@ -1320,67 +1472,34 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun reportStoppedBlockingOnce(id: String, sessionId: String, ticks: Long) {
-        val decision = stopReportState.begin(id, sessionId, ticks)
-        if (decision !is PlaybackStopReportDecision.Claimed) return
-        sendClaimedStopReportBlocking(decision.report, retryAsyncOnFailure = !userExitRequested)
-    }
-
-    private fun sendClaimedStopReportBlocking(
-        report: PlaybackStopReport,
-        retryAsyncOnFailure: Boolean
-    ) {
-        runCatching {
-            api.reportStoppedNow(
-                session,
-                report.itemId,
-                report.playSessionId,
-                report.positionTicks
-            )
-        }
-            .onFailure {
-                PTVLog.e("Stopped report failed item=${PTVLog.mask(report.itemId)}", it)
-                val reporter = when {
-                    userExitRequested -> JellyfinNativeApi(applicationContext)
-                    retryAsyncOnFailure && !destroyed && !Thread.currentThread().isInterrupted -> api
-                    else -> null
-                }
-                reporter?.reportStopped(
-                    session,
-                    report.itemId,
-                    report.playSessionId,
-                    report.positionTicks
-                )
-            }
-        stopReportState.complete(report)
-        finishAfterSettledStopReportIfRequested()
-    }
-
     private fun reportStoppedAsyncIfNeeded() {
         val id = itemId
         val decision = stopReportState.begin(
             id,
             playSessionId.orEmpty(),
-            lastKnownPositionMs.coerceAtLeast(player.currentPosition) * TICKS_PER_MILLISECOND
+            playbackPositionMs() * TICKS_PER_MILLISECOND
         )
         if (decision !is PlaybackStopReportDecision.Claimed) return
-        val report = decision.report
-        // This reporter owns a transport that is not canceled by this Activity's onDestroy().
-        // Navigation therefore remains immediate even when the server is slow, while the stop
-        // handoff can still finish in the background.
-        JellyfinNativeApi(applicationContext).reportStopped(
+        sendClaimedStopReportAsync(decision.report)
+    }
+
+    private fun sendClaimedStopReportAsync(report: PlaybackStopReport) {
+        // The dedicated reporting client is not canceled with metadata requests. Its shared serial
+        // dispatcher preserves Playing -> Progress -> Stopped order while navigation stays instant.
+        reportingApi.reportStopped(
             session,
             report.itemId,
             report.playSessionId,
             report.positionTicks
-        )
-        stopReportState.complete(report)
-    }
-
-    private fun finishAfterSettledStopReportIfRequested() {
-        if (!userExitRequested) return
-        runOnUiThread {
-            if (!destroyed && !isFinishing) finish()
+        ) { success ->
+            if (success) {
+                stopReportState.complete(report)
+            } else {
+                PTVLog.e(
+                    "Stopped report failed after retry item=${PTVLog.mask(report.itemId)}"
+                )
+                stopReportState.failed(report)
+            }
         }
     }
 
@@ -1544,11 +1663,43 @@ class VideoPlayerActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         activityForeground = true
+        createMediaSessionIfNeeded()
+        if (
+            playbackRequested &&
+            !playbackError &&
+            !transitionInFlight.get() &&
+            !userExitRequested &&
+            ::player.isInitialized &&
+            player.mediaItemCount > 0
+        ) {
+            player.play()
+        }
     }
 
     override fun onPause() {
         activityForeground = false
-        player.pause()
+        stopProgressLoops()
+        if (::player.isInitialized) {
+            lastKnownPositionMs = playbackPositionMs()
+            player.pause()
+            if (
+                ::session.isInitialized &&
+                ::itemId.isInitialized &&
+                player.mediaItemCount > 0 &&
+                !playSessionId.isNullOrBlank()
+            ) {
+                reportingApi.reportProgress(
+                    session,
+                    itemId,
+                    playSessionId.orEmpty(),
+                    lastKnownPositionMs * TICKS_PER_MILLISECOND,
+                    true
+                )
+            }
+        }
+        // Do not expose an Activity-owned player to remote/headset PLAY commands in background.
+        mediaSession?.release()
+        mediaSession = null
         super.onPause()
     }
 
@@ -1566,7 +1717,7 @@ class VideoPlayerActivity : AppCompatActivity() {
             return
         }
 
-        lastKnownPositionMs = player.currentPosition.coerceAtLeast(lastKnownPositionMs)
+        lastKnownPositionMs = playbackPositionMs()
         player.pause()
         reportStoppedAsyncIfNeeded()
         if (
@@ -1581,6 +1732,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (upNextOverlay != null && handleUpNextKey(keyCode)) return true
         if (playbackError && keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+            playbackRequested = true
             prepareItem(
                 itemId,
                 lastKnownPositionMs * TICKS_PER_MILLISECOND,
@@ -1830,7 +1982,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                 "subtitleMode" to subtitleMode.name,
                 "subtitleIndex" to (subtitleIndex?.toString() ?: "none"),
                 "dialogMs" to (SystemClock.elapsedRealtime() - startedAt).toString(),
-                "positionMs" to player.currentPosition.coerceAtLeast(0L).toString()
+                "positionMs" to playbackPositionMs().toString()
             )
         )
     }
@@ -1864,13 +2016,16 @@ class VideoPlayerActivity : AppCompatActivity() {
             return
         }
         val requested = requestedTrackSelection()
+        val resumeAfterRoute = playbackRequested
         val selectionGeneration = trackSelectionGeneration
         val generation = requestGeneration.get()
-        val requestedPositionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+        val requestedPositionTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
         val serverSelection = requested.takeIf {
             forceServerTrackSelection && it.hasExplicitTrack
         }
         showTemporaryStatus("Switching track...")
+        player.pause()
+        stopProgressLoops()
 
         launchApiWork(WORK_TRACK_ROUTE, "ptv-player-track-route") {
             runCatching {
@@ -1894,20 +2049,31 @@ class VideoPlayerActivity : AppCompatActivity() {
                     ) {
                         transitionInFlight.set(false)
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                         return@runOnUiThread
                     }
 
                     val oldItemId = itemId
                     val oldSessionId = playSessionId.orEmpty()
-                    val resumeTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+                    val resumeTicks = requestedPositionTicks
                     reportSessionStoppedAsync(oldItemId, oldSessionId, resumeTicks)
                     stopProgressLoops()
                     player.pause()
                     installPreparedPlayback(prepared, resumeTicks)
                     player.prepare()
-                    player.playWhenReady = true
-                    player.play()
-                    api.reportPlaying(session, itemId, prepared.stream.playSessionId, resumeTicks)
+                    val shouldPlay = resumeAfterRoute && activityForeground
+                    player.playWhenReady = shouldPlay
+                    if (shouldPlay) player.play()
+                    reportingApi.reportPlaying(
+                        session,
+                        itemId,
+                        prepared.stream.playSessionId,
+                        resumeTicks
+                    )
                     appliedTrackSelection = requested
                     transitionInFlight.set(false)
                     updateControlState()
@@ -1927,6 +2093,11 @@ class VideoPlayerActivity : AppCompatActivity() {
                     ) {
                         transitionInFlight.set(false)
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                         return@runOnUiThread
                     }
                     transitionInFlight.set(false)
@@ -1937,7 +2108,11 @@ class VideoPlayerActivity : AppCompatActivity() {
                     } else {
                         restoreAppliedTrackSelection()
                         showTemporaryStatus("Couldn't switch that track. Current playback continues.")
-                        if (player.playbackState == Player.STATE_READY) player.play()
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                     }
                 }
             }
@@ -1951,13 +2126,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     ) {
         val decision = stopReportState.begin(stoppedItemId, stoppedSessionId, positionTicks)
         if (decision !is PlaybackStopReportDecision.Claimed) return
-        api.reportStopped(
-            session,
-            decision.report.itemId,
-            decision.report.playSessionId,
-            decision.report.positionTicks
-        )
-        stopReportState.complete(decision.report)
+        sendClaimedStopReportAsync(decision.report)
     }
 
     private fun restoreAppliedTrackSelection() {
@@ -1991,27 +2160,18 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun restartPlayback(forceServerTrackSelection: Boolean = false) {
         if (!transitionInFlight.compareAndSet(false, true)) return
-        val positionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+        val positionTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
         val currentId = itemId
         val currentSession = playSessionId.orEmpty()
-        val generation = requestGeneration.get()
         stopProgressLoops()
         player.pause()
-        launchApiWork(WORK_RESTART, "ptv-player-restart") {
-            reportStoppedBlockingOnce(currentId, currentSession, positionTicks)
-            runOnUiThread {
-                if (
-                    !destroyed &&
-                    !userExitRequested &&
-                    generation == requestGeneration.get()
-                ) {
-                    prepareItem(
-                        currentId,
-                        positionTicks,
-                        forceServerTrackSelection = forceServerTrackSelection
-                    )
-                }
-            }
+        reportSessionStoppedAsync(currentId, currentSession, positionTicks)
+        if (!destroyed && !userExitRequested) {
+            prepareItem(
+                currentId,
+                positionTicks,
+                forceServerTrackSelection = forceServerTrackSelection
+            )
         }
     }
 
@@ -2026,7 +2186,10 @@ class VideoPlayerActivity : AppCompatActivity() {
         removeUpNextOverlay()
         clearPlaybackSkipSegments()
         if (::player.isInitialized) {
-            lastKnownPositionMs = player.currentPosition.coerceAtLeast(lastKnownPositionMs)
+            lastKnownPositionMs = playbackPositionMs()
+            if (!isChangingConfigurations && ::itemId.isInitialized && ::session.isInitialized) {
+                reportStoppedAsyncIfNeeded()
+            }
         }
         cancelAllApiWork()
         mediaSession?.release()
@@ -2055,9 +2218,11 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val PLAYER_DIALOG_WINDOW_SETTLE_MS = 100L
         private const val PLAYER_DIALOG_RESTORE_TIMEOUT_MS = 10_000
         private const val TRACK_DISCOVERY_GRACE_MS = 1_500L
+        private const val SUBTITLE_LOAD_ERROR_MATCH_WINDOW_MS = 5_000L
+        private const val SEEK_BACK_INCREMENT_MS = 10_000L
+        private const val SEEK_FORWARD_INCREMENT_MS = 30_000L
         private const val WORK_NEGOTIATION = "negotiation"
         private const val WORK_NEXT_LOOKUP = "next_lookup"
-        private const val WORK_RESTART = "restart"
         private const val WORK_TRACK_ROUTE = "track_route"
         private const val WORK_QUEUE_NAVIGATION = "queue_navigation"
         private const val WORK_SKIP_SEGMENTS = "skip_segments"

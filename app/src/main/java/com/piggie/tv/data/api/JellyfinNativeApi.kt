@@ -461,24 +461,78 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     fun reportPlaying(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
-        thread {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.PLAYING
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing", method = "POST", body = payload.toString(), token = session.token) }
+            request(session.serverUrl + "/Sessions/Playing", method = "POST", body = payload.toString(), token = session.token)
         }
     }
 
     fun reportProgress(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long, isPaused: Boolean) {
-        thread {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.PROGRESS
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks); put("IsPaused", isPaused) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token) }
+            request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token)
         }
     }
 
-    fun reportStopped(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
-        thread {
+    fun reportStopped(
+        session: NativeSession,
+        itemId: String,
+        playSessionId: String,
+        positionTicks: Long,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.STOPPED,
+            onComplete
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing/Stopped", method = "POST", body = payload.toString(), token = session.token) }
+            var lastFailure: Throwable? = null
+            repeat(2) {
+                val result = runCatching {
+                    request(
+                        session.serverUrl + "/Sessions/Playing/Stopped",
+                        method = "POST",
+                        body = payload.toString(),
+                        token = session.token
+                    )
+                }
+                if (result.isSuccess) return@enqueuePlaybackReport
+                lastFailure = result.exceptionOrNull()
+            }
+            throw requireNotNull(lastFailure)
         }
+    }
+
+    private fun enqueuePlaybackReport(
+        session: NativeSession,
+        itemId: String,
+        playSessionId: String,
+        kind: PlaybackReportKind,
+        onComplete: (Boolean) -> Unit = {},
+        send: () -> Unit
+    ) {
+        playbackReportDispatcher.enqueue(
+            sessionKey = listOf(
+                session.serverUrl,
+                session.userId
+            ).joinToString("\u0000"),
+            kind = kind,
+            send = send,
+            onComplete = onComplete
+        )
     }
 
     fun reportStoppedNow(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
@@ -760,5 +814,7 @@ class JellyfinNativeApi(private val context: Context) {
 
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null
+
+        val playbackReportDispatcher = PlaybackReportDispatcher()
     }
 }

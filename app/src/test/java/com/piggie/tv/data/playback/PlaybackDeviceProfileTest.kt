@@ -46,4 +46,48 @@ class PlaybackDeviceProfileTest {
         }
         assertTrue(methods.isNotEmpty())
     }
+
+    @Test
+    fun `Android decoder MIME types map to Jellyfin codec names`() {
+        val capabilities = PlaybackCodecCapabilityDetector.fromMimeTypes(
+            listOf(
+                "VIDEO/AVC",
+                "video/hevc",
+                "video/av01",
+                "audio/mp4a-latm",
+                "audio/eac3-joc",
+                "audio/true-hd",
+                "application/unsupported"
+            )
+        )
+
+        assertEquals(setOf("h264", "hevc", "av1"), capabilities.videoCodecs)
+        assertEquals(
+            setOf("aac", "aac_latm", "eac3", "truehd"),
+            capabilities.audioCodecs
+        )
+    }
+
+    @Test
+    fun `injected capabilities constrain direct play codecs and audio containers`() {
+        val profile = PlaybackDeviceProfile.build(
+            maxBitrate = 40_000_000,
+            capabilities = PlaybackCodecCapabilities(
+                videoCodecs = setOf("vp9", "h264"),
+                audioCodecs = setOf("opus", "aac_latm")
+            )
+        )
+        val directPlay = profile.getJSONArray("DirectPlayProfiles")
+        val profiles = (0 until directPlay.length()).map(directPlay::getJSONObject)
+        val video = profiles.single { it.getString("Type") == "Video" }
+        val audio = profiles.filter { it.getString("Type") == "Audio" }
+
+        assertEquals("h264,vp9", video.getString("VideoCodec"))
+        assertEquals("aac_latm,opus", video.getString("AudioCodec"))
+        assertEquals(
+            setOf("aac", "m4a,m4b", "opus", "webm,ogg"),
+            audio.map { it.getString("Container") }.toSet()
+        )
+        assertTrue(audio.none { it.getString("Container") == "flac" })
+    }
 }

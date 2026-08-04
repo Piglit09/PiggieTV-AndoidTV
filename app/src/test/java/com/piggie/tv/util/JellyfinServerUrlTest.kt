@@ -20,4 +20,12 @@ class JellyfinServerUrlTest {
     fun normalizePreservesExplicitHttp() {
         assertEquals("http://192.168.1.50:8096", JellyfinServerUrl.normalize("http://192.168.1.50:8096"))
     }
+
+    @Test
+    fun normalizePreservesCaseSensitiveReverseProxyPath() {
+        assertEquals(
+            "https://media.example.com/JellyFin",
+            JellyfinServerUrl.normalize("HTTPS://Media.Example.COM/JellyFin/")
+        )
+    }
 }
