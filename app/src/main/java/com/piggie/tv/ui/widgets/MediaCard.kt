@@ -188,6 +188,9 @@ object MediaCardFactory {
         onImageReady: (() -> Unit)? = null
     ) {
         resetBoundState(holder)
+        // Details navigation stores the focused media id from the focusable card root. Keeping
+        // the id only on the child ImageView made every back-stack focus snapshot null.
+        holder.view.tag = item.id
         holder.image.tag = item.id
         if (item.type == "ViewMore") {
             bindViewMore(holder, item)
@@ -333,6 +336,7 @@ object MediaCardFactory {
         }
 
         holder.image.tag = null
+        holder.view.tag = null
         holder.image.scaleType = ImageView.ScaleType.CENTER_CROP
         holder.image.background = null
         holder.image.alpha = 1f

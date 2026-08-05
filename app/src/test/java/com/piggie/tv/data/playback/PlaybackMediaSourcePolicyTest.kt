@@ -106,6 +106,32 @@ class PlaybackMediaSourcePolicyTest {
         assertTrue(plans.isEmpty())
     }
 
+    @Test
+    fun `forced transcode bypasses direct routes and filters incapable sources`() {
+        val plans = PlaybackMediaSourcePolicy.orderedPlans(
+            candidates = listOf(
+                source(
+                    id = "direct-only",
+                    order = 0,
+                    directPlay = true,
+                    transcode = false
+                ),
+                source(
+                    id = "transcodable",
+                    order = 1,
+                    directPlay = true,
+                    directStream = true,
+                    transcode = true
+                )
+            ),
+            preferredMediaSourceId = "direct-only",
+            forceTranscode = true
+        )
+
+        assertEquals(listOf("transcodable"), plans.map { it.source.id })
+        assertEquals(PlaybackRoute.TRANSCODE, plans.single().route)
+    }
+
     private fun source(
         id: String,
         order: Int,

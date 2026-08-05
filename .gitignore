@@ -7,3 +7,5 @@
 .gradle-cache/
 *.jks
 *.keystore
+.artifacts/
+.kotlin/errors/

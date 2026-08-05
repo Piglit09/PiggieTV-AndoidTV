@@ -24,6 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.C
@@ -32,13 +33,19 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.piggie.tv.R
+import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.models.PlaybackSkipSegment
 import com.piggie.tv.data.playback.AutoplayGuardState
 import com.piggie.tv.data.playback.AutoplayTrigger
 import com.piggie.tv.data.playback.ConnectionSpeed
@@ -55,6 +62,9 @@ import com.piggie.tv.data.playback.PlaybackTrackResolution
 import com.piggie.tv.data.playback.PlaybackTrackRouteResultPolicy
 import com.piggie.tv.data.playback.PlaybackTrackType
 import com.piggie.tv.data.playback.PlaybackSubtitleSidecarPolicy
+import com.piggie.tv.data.playback.SeasonPlaybackMode
+import com.piggie.tv.data.playback.SeasonPlaybackQueueHandoff
+import com.piggie.tv.data.playback.SeasonPlaybackQueuePolicy
 import com.piggie.tv.data.playback.SubtitleSelectionMode
 import com.piggie.tv.data.playback.UP_NEXT_THRESHOLD_MS
 import com.piggie.tv.data.playback.UpNextOverlayAction
@@ -68,6 +78,7 @@ import com.piggie.tv.util.PTVLog
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import okhttp3.OkHttpClient
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -79,6 +90,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val store by lazy { SecureSessionStore(this) }
     private val settings by lazy { NativeSettings(this) }
     private val negotiator by lazy { PlaybackNegotiator(api, settings) }
+    private val reportingApi by lazy { JellyfinNativeApi(applicationContext) }
 
     private lateinit var session: NativeSession
     private lateinit var itemId: String
@@ -102,6 +114,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val requestGeneration = AtomicInteger(0)
     private val transitionInFlight = AtomicBoolean(false)
     private val stopReportState = PlaybackStopReportState()
+    private val naturalCompletionState = PlaybackNaturalCompletionState()
     private val nextCallbacks = mutableListOf<(com.piggie.tv.data.models.MediaItem?) -> Unit>()
     private val apiWorkers = ConcurrentHashMap<Thread, NativeRequestScope>()
     private val apiWorkerKeys = ConcurrentHashMap<String, Thread>()
@@ -109,6 +122,11 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var playSessionId: String? = null
     private var currentItem: com.piggie.tv.data.models.MediaItem? = null
     private var nextEpisode: com.piggie.tv.data.models.MediaItem? = null
+    private var explicitEpisodeQueue: List<String> = emptyList()
+    private var explicitEpisodeItems: Map<String, com.piggie.tv.data.models.MediaItem> = emptyMap()
+    private var launchOrigin = PlaybackLaunchOrigin.DEFAULT
+    private var playbackSkipSegments: List<PlaybackSkipSegment> = emptyList()
+    private var activeSkipSegment: PlaybackSkipSegment? = null
     private var nextLookupInFlight = false
     private var nextLookupCompleted = false
     private var upNextOverlay: View? = null
@@ -121,6 +139,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var autoplayCanceled = false
     private var playbackError = false
     private var activityForeground = false
+    private var playbackRequested = true
     @Volatile private var userExitRequested = false
     private var destroyed = false
     private var lastKnownPositionMs = 0L
@@ -129,6 +148,9 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var pendingTrackRouteChange: Runnable? = null
     private var trackSelectionGeneration = 0
     private var sidecarFallbackAttemptedSelection: TrackSelectionSnapshot? = null
+    private var failedSubtitleLoadUri: String? = null
+    private var failedSubtitleLoadAtMs = 0L
+    private var transcodeFallbackAttempted = false
 
     private var audioIndex: Int? = null
     private var subtitleIndex: Int? = null
@@ -215,6 +237,15 @@ class VideoPlayerActivity : AppCompatActivity() {
         MusicPlaybackManager.stop()
         session = store.read() ?: run { finish(); return }
         itemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: run { finish(); return }
+        explicitEpisodeQueue = intent.getStringArrayListExtra(EXTRA_EPISODE_QUEUE_IDS)
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+            ?.distinct()
+            .orEmpty()
+        explicitEpisodeItems = SeasonPlaybackQueueHandoff.itemsFor(explicitEpisodeQueue)
+        launchOrigin = intent.getStringExtra(EXTRA_LAUNCH_ORIGIN)
+            ?.let { runCatching { PlaybackLaunchOrigin.valueOf(it) }.getOrNull() }
+            ?: PlaybackLaunchOrigin.DEFAULT
         audioIndex = intent.getIntExtra(EXTRA_AUDIO_INDEX, -1).takeIf { it != -1 }
         subtitleIndex = intent.getIntExtra(EXTRA_SUBTITLE_INDEX, -1).takeIf { it != -1 }
         subtitleMode = intent.getStringExtra(EXTRA_SUBTITLE_MODE)
@@ -229,6 +260,15 @@ class VideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun bindIndependentControlActions() {
+        playerView.findViewById<ImageButton>(R.id.player_previous_episode_btn)?.setOnClickListener {
+            navigateToPreviousEpisode()
+        }
+        playerView.findViewById<ImageButton>(R.id.player_restart_episode_btn)?.setOnClickListener {
+            restartCurrentItem()
+        }
+        playerView.findViewById<ImageButton>(R.id.player_next_episode_btn)?.setOnClickListener {
+            navigateToNextEpisode()
+        }
         playerView.findViewById<ImageButton>(R.id.player_audio_btn)?.setOnClickListener { opener ->
             currentItem?.let { showAudioSelection(it, opener) }
         }
@@ -238,11 +278,37 @@ class VideoPlayerActivity : AppCompatActivity() {
         playerView.findViewById<ImageButton>(R.id.player_connection_speed_btn)?.setOnClickListener { opener ->
             showConnectionSpeedSelection(opener)
         }
+        findViewById<Button>(R.id.player_skip_segment_btn)?.setOnClickListener {
+            skipActiveSegment()
+        }
         updateControlState()
     }
 
     private fun updateControlState() {
         val item = currentItem
+        playerView.findViewById<ImageButton>(R.id.player_previous_episode_btn)?.apply {
+            isEnabled = when {
+                item == null || !item.type.equals("Episode", ignoreCase = true) -> false
+                explicitEpisodeQueue.isNotEmpty() ->
+                    SeasonPlaybackQueuePolicy.previousId(explicitEpisodeQueue, item.id) != null
+                else -> !item.seriesId.isNullOrBlank()
+            }
+            alpha = if (isEnabled) 1f else 0.4f
+            contentDescription = if (isEnabled) "Previous Episode" else "Previous Episode unavailable"
+        }
+        playerView.findViewById<ImageButton>(R.id.player_restart_episode_btn)?.apply {
+            isEnabled = item != null
+            alpha = if (isEnabled) 1f else 0.4f
+        }
+        playerView.findViewById<ImageButton>(R.id.player_next_episode_btn)?.apply {
+            isEnabled = when {
+                item == null || !item.type.equals("Episode", ignoreCase = true) -> false
+                explicitEpisodeQueue.isNotEmpty() ->
+                    SeasonPlaybackQueuePolicy.nextId(explicitEpisodeQueue, item.id) != null
+                else -> true
+            }
+            alpha = if (isEnabled) 1f else 0.4f
+        }
         playerView.findViewById<ImageButton>(R.id.player_audio_btn)?.apply {
             isEnabled = item?.audioTracks?.isNotEmpty() == true
             alpha = if (isEnabled) 1f else 0.55f
@@ -297,14 +363,22 @@ class VideoPlayerActivity : AppCompatActivity() {
             .build()
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(OkHttpDataSource.Factory(client))
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
 
-        player = ExoPlayer.Builder(this)
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
+            .setSeekBackIncrementMs(SEEK_BACK_INCREMENT_MS)
+            .setSeekForwardIncrementMs(SEEK_FORWARD_INCREMENT_MS)
             .build()
         playerView.player = player
-        mediaSession = MediaSession.Builder(this, player)
-            .setId(VIDEO_MEDIA_SESSION_ID)
-            .build()
+        createMediaSessionIfNeeded()
         PtvDiagnosticsManager.routeRequested("player")
         PtvDiagnosticsManager.recordPlayback(PtvPlaybackTrace(itemId = itemId, event = "player_created"))
 
@@ -321,7 +395,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                     Player.STATE_READY -> {
                         statusView.isVisible = false
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
-                        startProgressLoops()
+                        if (activityForeground) startProgressLoops()
                         PtvDiagnosticsManager.routeVisible("player", "player_view")
                         PtvDiagnosticsManager.routeInteractive("player", "player_view")
                         PtvDiagnosticsManager.recordPlayback(
@@ -342,8 +416,29 @@ class VideoPlayerActivity : AppCompatActivity() {
                 )
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (
+                    reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST &&
+                    activityForeground &&
+                    !transitionInFlight.get()
+                ) {
+                    playbackRequested = playWhenReady
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && activityForeground) {
+                    startProgressLoops()
+                } else if (!activityForeground) {
+                    stopProgressLoops()
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
+                // Retry from the failure position, not the last 15-second reporting sample.
+                lastKnownPositionMs = playbackPositionMs()
                 if (attemptExternalSubtitleServerFallback(error)) return
+                if (attemptTranscodeFallback(error)) return
                 playbackError = true
                 stopProgressLoops()
                 PTVLog.e("Player error item=${PTVLog.mask(itemId)} code=${error.errorCodeName}", error)
@@ -353,23 +448,51 @@ class VideoPlayerActivity : AppCompatActivity() {
                 showStatus("Playback error. Press Select to retry or Back to exit.")
             }
         })
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: IOException,
+                wasCanceled: Boolean
+            ) {
+                val failedUri = loadEventInfo.uri.toString()
+                if (failedUri == selectedExternalSubtitleUrl()) {
+                    failedSubtitleLoadUri = failedUri
+                    failedSubtitleLoadAtMs = SystemClock.elapsedRealtime()
+                }
+            }
+        })
+    }
+
+    private fun createMediaSessionIfNeeded() {
+        if (mediaSession != null || destroyed || !::player.isInitialized) return
+        mediaSession = MediaSession.Builder(this, player)
+            .setId(VIDEO_MEDIA_SESSION_ID)
+            .build()
     }
 
     /** Negotiates and prepares an item on the one activity-owned ExoPlayer. */
     private fun prepareItem(
         newItemId: String,
         startTicks: Long,
-        forceServerTrackSelection: Boolean = false
+        forceServerTrackSelection: Boolean = false,
+        forceTranscode: Boolean = false
     ) {
         cancelPendingTrackRouteChange()
         cancelAllApiWork()
         val requestedAt = android.os.SystemClock.elapsedRealtime()
         val generation = requestGeneration.incrementAndGet()
         val requestedSelection = requestedTrackSelection()
+        if (!forceTranscode) transcodeFallbackAttempted = false
+        failedSubtitleLoadUri = null
+        failedSubtitleLoadAtMs = 0L
         val cachedDetails = currentItem
             ?.takeIf { it.id == newItemId && hasPlaybackTracks(it) }
             ?: MediaDetailsSeedStore.getItem(newItemId)?.takeIf(::hasPlaybackTracks)
+        naturalCompletionState.reset()
         resetNextEpisodeState()
+        clearPlaybackSkipSegments()
         playbackError = false
         showStatus("Loading video…")
         stopProgressLoops()
@@ -414,7 +537,8 @@ class VideoPlayerActivity : AppCompatActivity() {
                     positionTicks = startTicks,
                     audioIndex = selectedOnServer?.audioIndex,
                     subtitleIndex = selectedOnServer?.subtitleIndex,
-                    preferredMediaSourceId = details.mediaSourceId
+                    preferredMediaSourceId = details.mediaSourceId,
+                    forceTranscode = forceTranscode
                 )
                 PreparedPlayback(details, stream, validSelection, selectedOnServer)
             }.onSuccess { prepared ->
@@ -422,9 +546,15 @@ class VideoPlayerActivity : AppCompatActivity() {
                     if (destroyed || generation != requestGeneration.get()) return@runOnUiThread
                     installPreparedPlayback(prepared, startTicks)
                     player.prepare()
-                    player.playWhenReady = true
-                    player.play()
-                    api.reportPlaying(session, newItemId, prepared.stream.playSessionId, startTicks)
+                    val shouldPlay = playbackRequested && activityForeground
+                    player.playWhenReady = shouldPlay
+                    if (shouldPlay) player.play()
+                    reportingApi.reportPlaying(
+                        session,
+                        newItemId,
+                        prepared.stream.playSessionId,
+                        startTicks
+                    )
                     PtvDiagnosticsManager.recordPlayback(
                         PtvPlaybackTrace(
                             itemId = newItemId,
@@ -467,8 +597,13 @@ class VideoPlayerActivity : AppCompatActivity() {
         item.audioTracks.isNotEmpty() || item.subtitleTracks.isNotEmpty()
 
     private fun installPreparedPlayback(prepared: PreparedPlayback, startTicks: Long) {
+        val selectedDetails = prepared.details.copy(
+            mediaSourceId = prepared.stream.mediaSourceId,
+            audioTracks = prepared.stream.audioTracks,
+            subtitleTracks = prepared.stream.subtitleTracks
+        )
         itemId = prepared.details.id
-        currentItem = prepared.details
+        currentItem = selectedDetails
         currentStream = prepared.stream
         playSessionId = prepared.stream.playSessionId
         serverTrackSelection = prepared.serverSelection
@@ -477,15 +612,48 @@ class VideoPlayerActivity : AppCompatActivity() {
         subtitleIndex = prepared.selection.subtitleIndex
         lastKnownPositionMs = startTicks / TICKS_PER_MILLISECOND
 
-        findViewById<TextView>(R.id.player_title)?.text = prepared.details.title
+        findViewById<TextView>(R.id.player_title)?.text = selectedDetails.title
         findViewById<TextView>(R.id.player_subtitle)?.text =
-            prepared.details.seriesName ?: prepared.details.year
+            selectedDetails.seriesName ?: selectedDetails.year
 
         player.setMediaItem(
-            buildPlayerMediaItem(prepared.details, prepared.stream),
+            buildPlayerMediaItem(selectedDetails, prepared.stream),
             startTicks / TICKS_PER_MILLISECOND
         )
+        loadPlaybackSkipSegments(selectedDetails)
         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = false)
+    }
+
+    private fun loadPlaybackSkipSegments(details: com.piggie.tv.data.models.MediaItem) {
+        setPlaybackSkipSegments(details.playbackSkipSegments)
+        val generation = requestGeneration.get()
+        val requestedItemId = details.id
+        launchApiWork(WORK_SKIP_SEGMENTS, "ptv-playback-segments") {
+            val serverSegments = runCatching {
+                api.loadPlaybackSkipSegments(session, requestedItemId)
+            }.getOrDefault(emptyList())
+            runOnUiThread {
+                if (
+                    destroyed ||
+                    generation != requestGeneration.get() ||
+                    currentItem?.id != requestedItemId
+                ) return@runOnUiThread
+                setPlaybackSkipSegments(
+                    serverSegments.ifEmpty { details.playbackSkipSegments }
+                )
+            }
+        }
+    }
+
+    private fun setPlaybackSkipSegments(segments: List<PlaybackSkipSegment>) {
+        playbackSkipSegments = segments.filter(PlaybackSkipSegment::isValid)
+        inspectSkipSegment()
+    }
+
+    private fun clearPlaybackSkipSegments() {
+        playbackSkipSegments = emptyList()
+        activeSkipSegment = null
+        findViewById<Button>(R.id.player_skip_segment_btn)?.isVisible = false
     }
 
     private fun requestedTrackSelection() = TrackSelectionSnapshot(
@@ -574,6 +742,13 @@ class VideoPlayerActivity : AppCompatActivity() {
                 externalSubtitleUrl(itemId, stream.mediaSourceId, track)
             }
         }
+        val knownSidecarFailure = selectedSidecarUrl != null &&
+            selectedSidecarUrl == failedSubtitleLoadUri &&
+            SystemClock.elapsedRealtime() - failedSubtitleLoadAtMs <=
+                SUBTITLE_LOAD_ERROR_MATCH_WINDOW_MS
+        failedSubtitleLoadUri = null
+        failedSubtitleLoadAtMs = 0L
+        if (!knownSidecarFailure) return false
         val shouldFallback = PlaybackSubtitleSidecarPolicy.shouldAttemptServerFallback(
             hasServerSelection = serverTrackSelection != null,
             hasExplicitExternalSubtitle = selectedSubtitle?.let { track ->
@@ -602,10 +777,68 @@ class VideoPlayerActivity : AppCompatActivity() {
                 subtitleTrack = desired.subtitleIndex?.toString()
             )
         )
-        showStatus("Retrying subtitles with server compatibility modeâ€¦")
+        showStatus("Retrying subtitles with server compatibility mode...")
         requestTrackRoute(forceServerTrackSelection = true)
         return true
     }
+
+    private fun selectedExternalSubtitleUrl(): String? {
+        val selected = requestedTrackSelection()
+        val track = currentItem?.subtitleTracks?.firstOrNull {
+            selected.subtitleMode == SubtitleSelectionMode.TRACK &&
+                it.index == selected.subtitleIndex &&
+                it.isExternal &&
+                it.supportsExternalStream
+        } ?: return null
+        val stream = currentStream ?: return null
+        return externalSubtitleUrl(itemId, stream.mediaSourceId, track)
+    }
+
+    /**
+     * Jellyfin can occasionally approve direct playback that a particular TV decoder rejects.
+     * Retry once through the server's conservative HLS profile instead of looping the same route.
+     */
+    private fun attemptTranscodeFallback(error: PlaybackException): Boolean {
+        val stream = currentStream ?: return false
+        if (
+            destroyed ||
+            userExitRequested ||
+            transcodeFallbackAttempted ||
+            stream.method.equals("Transcode", ignoreCase = true)
+        ) return false
+
+        transcodeFallbackAttempted = true
+        playbackError = false
+        val resumeTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
+        stopProgressLoops()
+        reportStoppedAsyncIfNeeded()
+        PTVLog.e(
+            "Direct playback failed; retrying with server transcoding " +
+                "item=${PTVLog.mask(itemId)} code=${error.errorCodeName}",
+            error
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = itemId,
+                event = "transcode_fallback",
+                detail = error.errorCodeName,
+                playMethod = stream.method
+            )
+        )
+        showStatus("Retrying with server compatibility mode…")
+        prepareItem(
+            itemId,
+            resumeTicks,
+            forceServerTrackSelection = serverTrackSelection != null,
+            forceTranscode = true
+        )
+        return true
+    }
+
+    private fun playbackPositionMs(): Long = player.currentPosition.coerceAtLeast(0L)
+
+    private fun playerPositionMs(absolutePositionMs: Long): Long =
+        absolutePositionMs.coerceAtLeast(0L)
 
     private fun applyRequestedTrackSelection(
         tracks: Tracks,
@@ -781,8 +1014,8 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val reportRunnable = object : Runnable {
         override fun run() {
             if (destroyed) return
-            lastKnownPositionMs = player.currentPosition.coerceAtLeast(0L)
-            api.reportProgress(
+            lastKnownPositionMs = playbackPositionMs()
+            reportingApi.reportProgress(
                 session,
                 itemId,
                 playSessionId.orEmpty(),
@@ -796,6 +1029,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     private val countdownRunnable = object : Runnable {
         override fun run() {
             if (destroyed) return
+            inspectSkipSegment()
             inspectUpNextCountdown()
             handler.postDelayed(this, COUNTDOWN_TICK_MS)
         }
@@ -813,12 +1047,76 @@ class VideoPlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(countdownRunnable)
     }
 
+    private fun inspectSkipSegment() {
+        if (!::player.isInitialized) return
+        val button = findViewById<Button>(R.id.player_skip_segment_btn) ?: return
+        val segment = PlayerSkipSegmentPolicy.activeSegment(
+            playbackSkipSegments,
+            playbackPositionMs()
+        )
+        if (segment == null) {
+            activeSkipSegment = null
+            if (button.hasFocus()) playerView.requestFocus()
+            button.isVisible = false
+            return
+        }
+
+        val changed = segment != activeSkipSegment
+        activeSkipSegment = segment
+        button.text = PlayerSkipSegmentPolicy.label(segment)
+        button.contentDescription = button.text
+        button.isVisible = true
+        if (changed && !playerView.isControllerFullyVisible) {
+            button.post { if (button.isVisible && activeSkipSegment == segment) button.requestFocus() }
+        }
+    }
+
+    private fun skipActiveSegment() {
+        val segment = PlayerSkipSegmentPolicy.activeSegment(
+            playbackSkipSegments,
+            playbackPositionMs()
+        ) ?: run {
+            inspectSkipSegment()
+            return
+        }
+        val metadataDurationMs = currentItem?.runtimeTicks
+            ?.div(TICKS_PER_MILLISECOND)
+            ?.takeIf { it > 0L }
+            ?: player.duration
+        val targetMs = PlayerSkipSegmentPolicy.targetPositionMs(segment, metadataDurationMs) ?: return
+        if (targetMs <= playbackPositionMs()) return
+        player.seekTo(playerPositionMs(targetMs))
+        lastKnownPositionMs = targetMs
+        reportingApi.reportProgress(
+            session,
+            itemId,
+            playSessionId.orEmpty(),
+            targetMs * TICKS_PER_MILLISECOND,
+            false
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = itemId,
+                event = "segment_skipped",
+                detail = "type=${segment.type.name} targetMs=$targetMs"
+            )
+        )
+        activeSkipSegment = null
+        findViewById<Button>(R.id.player_skip_segment_btn)?.isVisible = false
+        playerView.requestFocus()
+        player.play()
+    }
+
     private fun inspectUpNextCountdown() {
         val current = currentItem ?: return
         if (!current.type.equals("Episode", ignoreCase = true)) return
-        val duration = player.duration.takeIf { it > 0 } ?: (current.runtimeTicks / TICKS_PER_MILLISECOND)
+        if (launchOrigin == PlaybackLaunchOrigin.CONTINUE_WATCHING) return
+        val duration = (current.runtimeTicks / TICKS_PER_MILLISECOND)
+            .takeIf { it > 0L }
+            ?: player.duration.takeIf { it > 0 }
+            ?: return
         if (duration <= 0) return
-        val remainingMs = (duration - player.currentPosition).coerceAtLeast(0L)
+        val remainingMs = (duration - playbackPositionMs()).coerceAtLeast(0L)
         if (remainingMs <= UP_NEXT_THRESHOLD_MS + NEXT_LOOKUP_HEAD_START_MS) ensureNextEpisodeResolved()
 
         val next = nextEpisode
@@ -852,35 +1150,98 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
         nextLookupInFlight = true
         val lookupForId = current.id
+        val explicitNextId = explicitEpisodeQueue
+            .takeIf { it.isNotEmpty() }
+            ?.let { SeasonPlaybackQueuePolicy.nextId(it, lookupForId) }
+        if (explicitEpisodeQueue.isNotEmpty() && explicitNextId == null) {
+            nextLookupInFlight = false
+            nextLookupCompleted = true
+            drainNextCallbacks(null)
+            return
+        }
+        val launchNext = SeasonPlaybackQueuePolicy.resolveNext(
+            queue = explicitEpisodeQueue,
+            currentItemId = lookupForId,
+            hydratedItem = null,
+            launchItems = explicitEpisodeItems
+        )
+        if (launchNext != null) {
+            completeNextEpisodeLookup(
+                lookupForId = lookupForId,
+                explicitNextId = explicitNextId,
+                next = launchNext,
+                resolution = "queue_launch_item"
+            )
+            return
+        }
         val generation = requestGeneration.get()
         launchApiWork(WORK_NEXT_LOOKUP, "ptv-next-episode") {
-            val next = runCatching { api.loadNextEpisode(session, current) }
+            val hydrated = runCatching {
+                explicitNextId?.let { api.loadItem(session, it) }
+                    ?: api.loadNextEpisode(session, current)
+            }
                 .onFailure {
                     if (!Thread.currentThread().isInterrupted) {
                         PTVLog.e("Next episode lookup failed item=${PTVLog.mask(lookupForId)}", it)
                     }
                 }
                 .getOrNull()
+            val next = if (explicitNextId != null) {
+                SeasonPlaybackQueuePolicy.resolveNext(
+                    queue = explicitEpisodeQueue,
+                    currentItemId = lookupForId,
+                    hydratedItem = hydrated,
+                    launchItems = explicitEpisodeItems
+                )
+            } else {
+                hydrated
+            }
             runOnUiThread {
                 if (
                     destroyed ||
                     generation != requestGeneration.get() ||
                     currentItem?.id != lookupForId
                 ) return@runOnUiThread
-                nextLookupInFlight = false
-                nextLookupCompleted = true
-                nextEpisode = next
-                PTVLog.i("Next episode decision current=${PTVLog.mask(lookupForId)} next=${PTVLog.mask(next?.id)}")
-                PtvDiagnosticsManager.recordPlayback(
-                    PtvPlaybackTrace(
-                        itemId = lookupForId,
-                        event = "next_episode_decision",
-                        detail = if (next == null) "no next episode" else "next=${PTVLog.mask(next.id)} autoplay=${settings.autoplayNextEpisode} canceled=$autoplayCanceled"
-                    )
+                completeNextEpisodeLookup(
+                    lookupForId = lookupForId,
+                    explicitNextId = explicitNextId,
+                    next = next,
+                    resolution = if (hydrated != null) "server_metadata" else "unresolved"
                 )
-                drainNextCallbacks(next)
             }
         }
+    }
+
+    private fun completeNextEpisodeLookup(
+        lookupForId: String,
+        explicitNextId: String?,
+        next: com.piggie.tv.data.models.MediaItem?,
+        resolution: String
+    ) {
+        nextLookupInFlight = false
+        nextLookupCompleted = true
+        nextEpisode = next
+        if (explicitNextId != null && next != null) {
+            MediaDetailsSeedStore.put(next)
+        }
+        PTVLog.i(
+            "Next episode decision current=${PTVLog.mask(lookupForId)} " +
+                "next=${PTVLog.mask(next?.id)} resolution=$resolution"
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = lookupForId,
+                event = "next_episode_decision",
+                detail = if (next == null) {
+                    "no next episode resolution=$resolution"
+                } else {
+                    "next=${PTVLog.mask(next.id)} resolution=$resolution " +
+                        "autoplay=${settings.autoplayNextEpisode} canceled=$autoplayCanceled"
+                }
+            )
+        )
+        updateControlState()
+        drainNextCallbacks(next)
     }
 
     private fun drainNextCallbacks(next: com.piggie.tv.data.models.MediaItem?) {
@@ -889,9 +1250,118 @@ class VideoPlayerActivity : AppCompatActivity() {
         callbacks.forEach { it(next) }
     }
 
+    private fun navigateToPreviousEpisode() {
+        val targetId = SeasonPlaybackQueuePolicy.previousId(explicitEpisodeQueue, itemId)
+        if (explicitEpisodeQueue.isNotEmpty()) {
+            if (targetId == null) {
+                showTemporaryStatus("No previous episode in this queue")
+            } else {
+                navigateToExplicitQueueItem(targetId, "previous")
+            }
+            return
+        }
+
+        val current = currentItem
+        if (current == null || current.seriesId.isNullOrBlank()) {
+            showTemporaryStatus("No previous episode available")
+            return
+        }
+        val generation = requestGeneration.get()
+        val currentId = current.id
+        launchApiWork(WORK_QUEUE_NAVIGATION, "ptv-series-previous") {
+            val previous = runCatching { api.loadPreviousEpisode(session, current) }.getOrNull()
+            runOnUiThread {
+                if (
+                    destroyed ||
+                    generation != requestGeneration.get() ||
+                    itemId != currentId
+                ) return@runOnUiThread
+                if (previous == null) {
+                    showTemporaryStatus("No previous episode available")
+                } else {
+                    MediaDetailsSeedStore.put(previous)
+                    transitionToManualQueueItem(previous, "previous")
+                }
+            }
+        }
+    }
+
+    private fun navigateToNextEpisode() {
+        val explicitTargetId = SeasonPlaybackQueuePolicy.nextId(explicitEpisodeQueue, itemId)
+        if (explicitEpisodeQueue.isNotEmpty()) {
+            if (explicitTargetId == null) {
+                showTemporaryStatus("No next episode in this queue")
+            } else {
+                navigateToExplicitQueueItem(explicitTargetId, "next")
+            }
+            return
+        }
+
+        ensureNextEpisodeResolved { next ->
+            if (next == null) {
+                showTemporaryStatus("No next episode available")
+            } else {
+                transitionToManualQueueItem(next, "next")
+            }
+        }
+    }
+
+    private fun navigateToExplicitQueueItem(targetId: String, direction: String) {
+        val currentId = itemId
+        val launchItem = SeasonPlaybackQueuePolicy.resolveItem(
+            queue = explicitEpisodeQueue,
+            expectedId = targetId,
+            hydratedItem = null,
+            launchItems = explicitEpisodeItems
+        )
+        if (launchItem != null) {
+            transitionToManualQueueItem(launchItem, direction)
+            return
+        }
+
+        val generation = requestGeneration.get()
+        launchApiWork(WORK_QUEUE_NAVIGATION, "ptv-queue-$direction") {
+            val hydrated = runCatching { api.loadItem(session, targetId) }.getOrNull()
+            val resolved = SeasonPlaybackQueuePolicy.resolveItem(
+                queue = explicitEpisodeQueue,
+                expectedId = targetId,
+                hydratedItem = hydrated,
+                launchItems = explicitEpisodeItems
+            )
+            runOnUiThread {
+                if (
+                    destroyed ||
+                    generation != requestGeneration.get() ||
+                    itemId != currentId
+                ) return@runOnUiThread
+                if (resolved == null) {
+                    showTemporaryStatus("Unable to load that episode")
+                } else {
+                    MediaDetailsSeedStore.put(resolved)
+                    transitionToManualQueueItem(resolved, direction)
+                }
+            }
+        }
+    }
+
+    private fun restartCurrentItem() {
+        if (currentItem == null || transitionInFlight.get()) return
+        playbackRequested = true
+        resetNextEpisodeState()
+        player.seekTo(0L)
+        lastKnownPositionMs = 0L
+        player.playWhenReady = true
+        player.play()
+        reportingApi.reportProgress(session, itemId, playSessionId.orEmpty(), 0L, false)
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(itemId = itemId, event = "playback_restarted")
+        )
+        updateControlState()
+    }
+
     private fun handlePlaybackEnded() {
         stopProgressLoops()
-        lastKnownPositionMs = player.currentPosition.coerceAtLeast(0L)
+        lastKnownPositionMs = playbackPositionMs()
         val current = currentItem
         PTVLog.i(
             "Playback ended item=${PTVLog.mask(itemId)} canceled=$autoplayCanceled " +
@@ -913,6 +1383,10 @@ class VideoPlayerActivity : AppCompatActivity() {
             )
             return
         }
+        if (launchOrigin == PlaybackLaunchOrigin.CONTINUE_WATCHING) {
+            finishAfterNaturalCompletion(current)
+            return
+        }
         if (current == null || !current.type.equals("Episode", ignoreCase = true)) {
             reportStoppedAsyncIfNeeded()
             finish()
@@ -930,8 +1404,26 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun finishAfterNaturalCompletion(
+        completedItem: com.piggie.tv.data.models.MediaItem?
+    ) {
+        if (!naturalCompletionState.claim()) return
+        reportStoppedAsyncIfNeeded()
+        if (
+            completedItem != null &&
+            PlaybackExitPolicy.afterNaturalCompletion(launchOrigin) ==
+            PlaybackExitDestination.DETAILS
+        ) {
+            val completedSeed = NaturalCompletionDetailsGuard.markCompleted(completedItem)
+            MediaDetailsSeedStore.put(completedSeed)
+            MediaDetailsActivity.start(this, completedSeed)
+        }
+        if (!isFinishing) finish()
+    }
+
     private fun guardState(hasNext: Boolean) = AutoplayGuardState(
-        enabled = settings.autoplayNextEpisode,
+        enabled = launchOrigin != PlaybackLaunchOrigin.CONTINUE_WATCHING &&
+            (explicitEpisodeQueue.isNotEmpty() || settings.autoplayNextEpisode),
         canceled = autoplayCanceled,
         hasNextItem = hasNext,
         appForeground = activityForeground,
@@ -943,66 +1435,41 @@ class VideoPlayerActivity : AppCompatActivity() {
     private fun transitionTo(next: com.piggie.tv.data.models.MediaItem, trigger: AutoplayTrigger) {
         val guard = guardState(hasNext = true)
         if (!NextEpisodeAutoplayPolicy.shouldStart(trigger, guard)) return
+        beginItemTransition(next, "autoplay:$trigger")
+    }
+
+    private fun transitionToManualQueueItem(
+        next: com.piggie.tv.data.models.MediaItem,
+        direction: String
+    ) {
+        beginItemTransition(next, "manual:$direction")
+    }
+
+    private fun beginItemTransition(
+        next: com.piggie.tv.data.models.MediaItem,
+        reason: String
+    ) {
         if (!transitionInFlight.compareAndSet(false, true)) return
+        playbackRequested = true
 
         removeUpNextOverlay()
         stopProgressLoops()
         val oldItemId = itemId
-        val oldSessionId = playSessionId.orEmpty()
-        val finalTicks = player.currentPosition.coerceAtLeast(0L) * TICKS_PER_MILLISECOND
-        val generation = requestGeneration.get()
         player.pause()
-        PTVLog.i("Autoplay transition trigger=$trigger from=${PTVLog.mask(oldItemId)} to=${PTVLog.mask(next.id)}")
+        PTVLog.i("Playback transition reason=$reason from=${PTVLog.mask(oldItemId)} to=${PTVLog.mask(next.id)}")
         PtvDiagnosticsManager.recordPlayback(
-            PtvPlaybackTrace(itemId = oldItemId, event = "next_item_transition", detail = "trigger=$trigger next=${PTVLog.mask(next.id)}")
+            PtvPlaybackTrace(itemId = oldItemId, event = "next_item_transition", detail = "reason=$reason next=${PTVLog.mask(next.id)}")
         )
 
-        launchApiWork(WORK_NEXT_TRANSITION, "ptv-next-transition") {
-            reportStoppedBlockingOnce(oldItemId, oldSessionId, finalTicks)
-            runOnUiThread {
-                if (
-                    !destroyed &&
-                    !userExitRequested &&
-                    generation == requestGeneration.get()
-                ) {
-                    applyPendingPreference(next.id)
-                    prepareItem(next.id, 0L)
-                }
-            }
+        // Advancing a queue must not wait on a reporting endpoint: the metadata client's call
+        // timeout is intentionally generous, and a slow server otherwise leaves the viewer on
+        // the ended frame for tens of seconds. The detached reporter owns its transport, so the
+        // following prepareItem() cancellation cannot cancel the stop handoff.
+        reportStoppedAsyncIfNeeded()
+        if (!destroyed && !userExitRequested) {
+            applyPendingPreference(next.id)
+            prepareItem(next.id, 0L)
         }
-    }
-
-    private fun reportStoppedBlockingOnce(id: String, sessionId: String, ticks: Long) {
-        val decision = stopReportState.begin(id, sessionId, ticks)
-        if (decision !is PlaybackStopReportDecision.Claimed) return
-        sendClaimedStopReportBlocking(decision.report, retryAsyncOnFailure = !userExitRequested)
-    }
-
-    private fun sendClaimedStopReportBlocking(
-        report: PlaybackStopReport,
-        retryAsyncOnFailure: Boolean
-    ) {
-        runCatching {
-            api.reportStoppedNow(
-                session,
-                report.itemId,
-                report.playSessionId,
-                report.positionTicks
-            )
-        }
-            .onFailure {
-                PTVLog.e("Stopped report failed item=${PTVLog.mask(report.itemId)}", it)
-                if (retryAsyncOnFailure && !destroyed && !Thread.currentThread().isInterrupted) {
-                    api.reportStopped(
-                        session,
-                        report.itemId,
-                        report.playSessionId,
-                        report.positionTicks
-                    )
-                }
-            }
-        stopReportState.complete(report)
-        finishAfterSettledStopReportIfRequested()
     }
 
     private fun reportStoppedAsyncIfNeeded() {
@@ -1010,23 +1477,29 @@ class VideoPlayerActivity : AppCompatActivity() {
         val decision = stopReportState.begin(
             id,
             playSessionId.orEmpty(),
-            lastKnownPositionMs.coerceAtLeast(player.currentPosition) * TICKS_PER_MILLISECOND
+            playbackPositionMs() * TICKS_PER_MILLISECOND
         )
         if (decision !is PlaybackStopReportDecision.Claimed) return
-        val report = decision.report
-        api.reportStopped(
+        sendClaimedStopReportAsync(decision.report)
+    }
+
+    private fun sendClaimedStopReportAsync(report: PlaybackStopReport) {
+        // The dedicated reporting client is not canceled with metadata requests. Its shared serial
+        // dispatcher preserves Playing -> Progress -> Stopped order while navigation stays instant.
+        reportingApi.reportStopped(
             session,
             report.itemId,
             report.playSessionId,
             report.positionTicks
-        )
-        stopReportState.complete(report)
-    }
-
-    private fun finishAfterSettledStopReportIfRequested() {
-        if (!userExitRequested) return
-        runOnUiThread {
-            if (!destroyed && !isFinishing) finish()
+        ) { success ->
+            if (success) {
+                stopReportState.complete(report)
+            } else {
+                PTVLog.e(
+                    "Stopped report failed after retry item=${PTVLog.mask(report.itemId)}"
+                )
+                stopReportState.failed(report)
+            }
         }
     }
 
@@ -1190,11 +1663,43 @@ class VideoPlayerActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         activityForeground = true
+        createMediaSessionIfNeeded()
+        if (
+            playbackRequested &&
+            !playbackError &&
+            !transitionInFlight.get() &&
+            !userExitRequested &&
+            ::player.isInitialized &&
+            player.mediaItemCount > 0
+        ) {
+            player.play()
+        }
     }
 
     override fun onPause() {
         activityForeground = false
-        player.pause()
+        stopProgressLoops()
+        if (::player.isInitialized) {
+            lastKnownPositionMs = playbackPositionMs()
+            player.pause()
+            if (
+                ::session.isInitialized &&
+                ::itemId.isInitialized &&
+                player.mediaItemCount > 0 &&
+                !playSessionId.isNullOrBlank()
+            ) {
+                reportingApi.reportProgress(
+                    session,
+                    itemId,
+                    playSessionId.orEmpty(),
+                    lastKnownPositionMs * TICKS_PER_MILLISECOND,
+                    true
+                )
+            }
+        }
+        // Do not expose an Activity-owned player to remote/headset PLAY commands in background.
+        mediaSession?.release()
+        mediaSession = null
         super.onPause()
     }
 
@@ -1205,35 +1710,29 @@ class VideoPlayerActivity : AppCompatActivity() {
         autoplayCanceled = true
         stopProgressLoops()
         removeUpNextOverlay()
+        clearPlaybackSkipSegments()
 
         if (!::player.isInitialized || !::itemId.isInitialized || !::session.isInitialized) {
             finish()
             return
         }
 
-        lastKnownPositionMs = player.currentPosition.coerceAtLeast(lastKnownPositionMs)
+        lastKnownPositionMs = playbackPositionMs()
         player.pause()
-        val decision = stopReportState.begin(
-            itemId,
-            playSessionId.orEmpty(),
-            lastKnownPositionMs * TICKS_PER_MILLISECOND
-        )
-        when (decision) {
-            is PlaybackStopReportDecision.Claimed -> {
-                transitionInFlight.set(true)
-                launchApiWork(WORK_USER_EXIT, "ptv-player-user-exit") {
-                    sendClaimedStopReportBlocking(decision.report, retryAsyncOnFailure = false)
-                }
-            }
-            PlaybackStopReportDecision.InFlight -> Unit
-            PlaybackStopReportDecision.Complete,
-            PlaybackStopReportDecision.NoActiveSession -> finish()
+        reportStoppedAsyncIfNeeded()
+        if (
+            PlaybackExitPolicy.afterUserBack(launchOrigin) ==
+            PlaybackExitDestination.HOME
+        ) {
+            startActivity(PtvHostActivity.returnHomeIntent(this))
         }
+        finish()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (upNextOverlay != null && handleUpNextKey(keyCode)) return true
         if (playbackError && keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+            playbackRequested = true
             prepareItem(
                 itemId,
                 lastKnownPositionMs * TICKS_PER_MILLISECOND,
@@ -1244,7 +1743,11 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
         if (playerView.isControllerFullyVisible) {
             if (keyCode == KeyEvent.KEYCODE_BACK) {
-                playerView.hideController()
+                if (launchOrigin == PlaybackLaunchOrigin.CONTINUE_WATCHING) {
+                    requestUserExit()
+                } else {
+                    playerView.hideController()
+                }
                 return true
             }
         } else if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
@@ -1479,7 +1982,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                 "subtitleMode" to subtitleMode.name,
                 "subtitleIndex" to (subtitleIndex?.toString() ?: "none"),
                 "dialogMs" to (SystemClock.elapsedRealtime() - startedAt).toString(),
-                "positionMs" to player.currentPosition.coerceAtLeast(0L).toString()
+                "positionMs" to playbackPositionMs().toString()
             )
         )
     }
@@ -1513,13 +2016,16 @@ class VideoPlayerActivity : AppCompatActivity() {
             return
         }
         val requested = requestedTrackSelection()
+        val resumeAfterRoute = playbackRequested
         val selectionGeneration = trackSelectionGeneration
         val generation = requestGeneration.get()
-        val requestedPositionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+        val requestedPositionTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
         val serverSelection = requested.takeIf {
             forceServerTrackSelection && it.hasExplicitTrack
         }
         showTemporaryStatus("Switching track...")
+        player.pause()
+        stopProgressLoops()
 
         launchApiWork(WORK_TRACK_ROUTE, "ptv-player-track-route") {
             runCatching {
@@ -1543,20 +2049,31 @@ class VideoPlayerActivity : AppCompatActivity() {
                     ) {
                         transitionInFlight.set(false)
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                         return@runOnUiThread
                     }
 
                     val oldItemId = itemId
                     val oldSessionId = playSessionId.orEmpty()
-                    val resumeTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+                    val resumeTicks = requestedPositionTicks
                     reportSessionStoppedAsync(oldItemId, oldSessionId, resumeTicks)
                     stopProgressLoops()
                     player.pause()
                     installPreparedPlayback(prepared, resumeTicks)
                     player.prepare()
-                    player.playWhenReady = true
-                    player.play()
-                    api.reportPlaying(session, itemId, prepared.stream.playSessionId, resumeTicks)
+                    val shouldPlay = resumeAfterRoute && activityForeground
+                    player.playWhenReady = shouldPlay
+                    if (shouldPlay) player.play()
+                    reportingApi.reportPlaying(
+                        session,
+                        itemId,
+                        prepared.stream.playSessionId,
+                        resumeTicks
+                    )
                     appliedTrackSelection = requested
                     transitionInFlight.set(false)
                     updateControlState()
@@ -1576,6 +2093,11 @@ class VideoPlayerActivity : AppCompatActivity() {
                     ) {
                         transitionInFlight.set(false)
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                         return@runOnUiThread
                     }
                     transitionInFlight.set(false)
@@ -1586,7 +2108,11 @@ class VideoPlayerActivity : AppCompatActivity() {
                     } else {
                         restoreAppliedTrackSelection()
                         showTemporaryStatus("Couldn't switch that track. Current playback continues.")
-                        if (player.playbackState == Player.STATE_READY) player.play()
+                        if (
+                            resumeAfterRoute &&
+                            activityForeground &&
+                            player.playbackState == Player.STATE_READY
+                        ) player.play()
                     }
                 }
             }
@@ -1600,13 +2126,7 @@ class VideoPlayerActivity : AppCompatActivity() {
     ) {
         val decision = stopReportState.begin(stoppedItemId, stoppedSessionId, positionTicks)
         if (decision !is PlaybackStopReportDecision.Claimed) return
-        api.reportStopped(
-            session,
-            decision.report.itemId,
-            decision.report.playSessionId,
-            decision.report.positionTicks
-        )
-        stopReportState.complete(decision.report)
+        sendClaimedStopReportAsync(decision.report)
     }
 
     private fun restoreAppliedTrackSelection() {
@@ -1640,27 +2160,18 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun restartPlayback(forceServerTrackSelection: Boolean = false) {
         if (!transitionInFlight.compareAndSet(false, true)) return
-        val positionTicks = PlayerRestartPolicy.positionTicks(player.currentPosition)
+        val positionTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
         val currentId = itemId
         val currentSession = playSessionId.orEmpty()
-        val generation = requestGeneration.get()
         stopProgressLoops()
         player.pause()
-        launchApiWork(WORK_RESTART, "ptv-player-restart") {
-            reportStoppedBlockingOnce(currentId, currentSession, positionTicks)
-            runOnUiThread {
-                if (
-                    !destroyed &&
-                    !userExitRequested &&
-                    generation == requestGeneration.get()
-                ) {
-                    prepareItem(
-                        currentId,
-                        positionTicks,
-                        forceServerTrackSelection = forceServerTrackSelection
-                    )
-                }
-            }
+        reportSessionStoppedAsync(currentId, currentSession, positionTicks)
+        if (!destroyed && !userExitRequested) {
+            prepareItem(
+                currentId,
+                positionTicks,
+                forceServerTrackSelection = forceServerTrackSelection
+            )
         }
     }
 
@@ -1673,8 +2184,12 @@ class VideoPlayerActivity : AppCompatActivity() {
         playerDialogTimeoutState.clear()
         stopProgressLoops()
         removeUpNextOverlay()
+        clearPlaybackSkipSegments()
         if (::player.isInitialized) {
-            lastKnownPositionMs = player.currentPosition.coerceAtLeast(lastKnownPositionMs)
+            lastKnownPositionMs = playbackPositionMs()
+            if (!isChangingConfigurations && ::itemId.isInitialized && ::session.isInitialized) {
+                reportStoppedAsyncIfNeeded()
+            }
         }
         cancelAllApiWork()
         mediaSession?.release()
@@ -1693,6 +2208,8 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val EXTRA_AUDIO_INDEX = "extra_audio_index"
         private const val EXTRA_SUBTITLE_INDEX = "extra_subtitle_index"
         private const val EXTRA_SUBTITLE_MODE = "extra_subtitle_mode"
+        private const val EXTRA_EPISODE_QUEUE_IDS = "extra_episode_queue_ids"
+        private const val EXTRA_LAUNCH_ORIGIN = "extra_launch_origin"
         private const val REPORTING_INTERVAL_MS = 15_000L
         private const val COUNTDOWN_TICK_MS = 500L
         private const val NEXT_LOOKUP_HEAD_START_MS = 5_000L
@@ -1701,17 +2218,20 @@ class VideoPlayerActivity : AppCompatActivity() {
         private const val PLAYER_DIALOG_WINDOW_SETTLE_MS = 100L
         private const val PLAYER_DIALOG_RESTORE_TIMEOUT_MS = 10_000
         private const val TRACK_DISCOVERY_GRACE_MS = 1_500L
+        private const val SUBTITLE_LOAD_ERROR_MATCH_WINDOW_MS = 5_000L
+        private const val SEEK_BACK_INCREMENT_MS = 10_000L
+        private const val SEEK_FORWARD_INCREMENT_MS = 30_000L
         private const val WORK_NEGOTIATION = "negotiation"
         private const val WORK_NEXT_LOOKUP = "next_lookup"
-        private const val WORK_NEXT_TRANSITION = "next_transition"
-        private const val WORK_RESTART = "restart"
         private const val WORK_TRACK_ROUTE = "track_route"
-        private const val WORK_USER_EXIT = "user_exit"
+        private const val WORK_QUEUE_NAVIGATION = "queue_navigation"
+        private const val WORK_SKIP_SEGMENTS = "skip_segments"
         fun start(
             context: Context,
             itemId: String,
             startTicks: Long,
-            preference: PendingPlaybackPreference
+            preference: PendingPlaybackPreference,
+            origin: PlaybackLaunchOrigin = PlaybackLaunchOrigin.DEFAULT
         ) {
             start(
                 context,
@@ -1719,7 +2239,8 @@ class VideoPlayerActivity : AppCompatActivity() {
                 startTicks,
                 preference.audioIndex,
                 preference.subtitleIndex,
-                preference.subtitleMode
+                preference.subtitleMode,
+                origin
             )
         }
 
@@ -1730,15 +2251,53 @@ class VideoPlayerActivity : AppCompatActivity() {
             audioIndex: Int? = null,
             subtitleIndex: Int? = null,
             subtitleMode: SubtitleSelectionMode =
-                if (subtitleIndex != null) SubtitleSelectionMode.TRACK else SubtitleSelectionMode.DEFAULT
+                if (subtitleIndex != null) SubtitleSelectionMode.TRACK else SubtitleSelectionMode.DEFAULT,
+            origin: PlaybackLaunchOrigin = PlaybackLaunchOrigin.DEFAULT
         ) {
+            NaturalCompletionDetailsGuard.clear(itemId)
             context.startActivity(Intent(context, VideoPlayerActivity::class.java).apply {
                 putExtra(EXTRA_ITEM_ID, itemId)
                 putExtra(EXTRA_START_TICKS, startTicks)
                 if (audioIndex != null) putExtra(EXTRA_AUDIO_INDEX, audioIndex)
                 if (subtitleIndex != null) putExtra(EXTRA_SUBTITLE_INDEX, subtitleIndex)
                 putExtra(EXTRA_SUBTITLE_MODE, subtitleMode.name)
+                putExtra(EXTRA_LAUNCH_ORIGIN, origin.name)
             })
+        }
+
+        /** Starts a bounded season queue and prevents autoplay from spilling into another season. */
+        fun startSeason(
+            context: Context,
+            episodes: List<com.piggie.tv.data.models.MediaItem>,
+            shuffle: Boolean
+        ): Boolean = startEpisodeQueue(context, episodes, shuffle)
+
+        /** Starts a bounded whole-series queue without spilling into unrelated episodes. */
+        fun startSeries(
+            context: Context,
+            episodes: List<com.piggie.tv.data.models.MediaItem>,
+            shuffle: Boolean
+        ): Boolean = startEpisodeQueue(context, episodes, shuffle)
+
+        private fun startEpisodeQueue(
+            context: Context,
+            episodes: List<com.piggie.tv.data.models.MediaItem>,
+            shuffle: Boolean
+        ): Boolean {
+            val queue = SeasonPlaybackQueuePolicy.build(
+                episodes,
+                if (shuffle) SeasonPlaybackMode.SHUFFLE_ALL else SeasonPlaybackMode.PLAY_ALL
+            )
+            val firstItemId = queue.firstOrNull() ?: return false
+            queue.forEach(NaturalCompletionDetailsGuard::clear)
+            SeasonPlaybackQueueHandoff.publish(queue, episodes)
+            context.startActivity(Intent(context, VideoPlayerActivity::class.java).apply {
+                putExtra(EXTRA_ITEM_ID, firstItemId)
+                putExtra(EXTRA_START_TICKS, 0L)
+                putExtra(EXTRA_SUBTITLE_MODE, SubtitleSelectionMode.DEFAULT.name)
+                putStringArrayListExtra(EXTRA_EPISODE_QUEUE_IDS, ArrayList(queue))
+            })
+            return true
         }
     }
 }

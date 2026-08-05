@@ -711,15 +711,15 @@ class MusicDetailsActivity : AppCompatActivity() {
         minimumHeight = 0
         minWidth = 0
         minimumWidth = 0
-        setTextSizeRes(R.dimen.tv_nav_text_size)
+        setTextSizeRes(R.dimen.tv_details_action_text_size)
         setTextColor(getColor(R.color.tv_text_primary))
         background = actionBackground(primary)
         elevation = 0f
         stateListAnimator = null
         setPadding(
-            dim(R.dimen.tv_spacing_large),
+            dim(R.dimen.tv_details_action_padding_horizontal),
             0,
-            dim(R.dimen.tv_spacing_large),
+            dim(R.dimen.tv_details_action_padding_horizontal),
             0
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -818,7 +818,7 @@ class MusicDetailsActivity : AppCompatActivity() {
         }
 
         override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
-            if (holder is HeaderHolder) holder.art.dispose()
+            if (holder is HeaderHolder) holder.recycle()
             if (holder is RelatedHolder) holder.recycle()
             super.onViewRecycled(holder)
         }
@@ -856,6 +856,25 @@ class MusicDetailsActivity : AppCompatActivity() {
             ).apply {
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val logo = ImageView(parent.context).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                visibility = View.INVISIBLE
+            }
+            val identity = FrameLayout(parent.context).apply {
+                addView(
+                    title,
+                    FrameLayout.LayoutParams(-1, -1)
+                )
+                addView(
+                    logo,
+                    FrameLayout.LayoutParams(
+                        dim(R.dimen.tv_details_logo_width),
+                        dim(R.dimen.tv_details_logo_height),
+                        Gravity.START or Gravity.CENTER_VERTICAL
+                    )
+                )
             }
             val metadata = text(
                 "",
@@ -879,17 +898,20 @@ class MusicDetailsActivity : AppCompatActivity() {
                 play,
                 LinearLayout.LayoutParams(
                     -2,
-                    dim(R.dimen.tv_hero_button_height)
+                    dim(R.dimen.tv_details_action_height)
                 )
             )
             actions.addView(
                 shuffle,
                 LinearLayout.LayoutParams(
                     -2,
-                    dim(R.dimen.tv_hero_button_height)
+                    dim(R.dimen.tv_details_action_height)
                 ).apply { marginStart = dim(R.dimen.tv_spacing_medium) }
             )
-            titleColumn.addView(title)
+            titleColumn.addView(
+                identity,
+                LinearLayout.LayoutParams(-1, dim(R.dimen.tv_details_logo_height))
+            )
             titleColumn.addView(metadata)
             titleColumn.addView(actions)
             top.addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
@@ -904,7 +926,7 @@ class MusicDetailsActivity : AppCompatActivity() {
             }
             container.addView(top)
             container.addView(overview)
-            return HeaderHolder(container, art, title, metadata, overview, play, shuffle)
+            return HeaderHolder(container, art, logo, title, metadata, overview, play, shuffle)
         }
 
         private fun createTrackHolder(parent: ViewGroup): TrackHolder {
@@ -1008,7 +1030,7 @@ class MusicDetailsActivity : AppCompatActivity() {
             container.addView(message)
             container.addView(
                 retry,
-                LinearLayout.LayoutParams(-2, dim(R.dimen.tv_hero_button_height)).apply {
+                LinearLayout.LayoutParams(-2, dim(R.dimen.tv_details_action_height)).apply {
                     topMargin = dim(R.dimen.tv_spacing_medium)
                 }
             )
@@ -1018,6 +1040,7 @@ class MusicDetailsActivity : AppCompatActivity() {
         private inner class HeaderHolder(
             view: View,
             val art: ImageView,
+            private val logo: ImageView,
             private val title: TextView,
             private val metadata: TextView,
             private val overview: TextView,
@@ -1025,7 +1048,7 @@ class MusicDetailsActivity : AppCompatActivity() {
             private val shuffle: Button
         ) : RecyclerView.ViewHolder(view) {
             fun bind(details: MediaItem) {
-                title.text = details.title
+                bindTitle(details)
                 metadata.text = headerMetadata(details)
                 val sanitizedOverview = TextSanitizer.sanitize(details.overview)
                 overview.text = sanitizedOverview
@@ -1046,6 +1069,58 @@ class MusicDetailsActivity : AppCompatActivity() {
                     dim(R.dimen.tv_square_height),
                     "cover"
                 )
+            }
+
+            fun recycle() {
+                art.tag = null
+                art.dispose()
+                logo.tag = null
+                logo.dispose()
+                logo.setImageDrawable(null)
+                logo.visibility = View.INVISIBLE
+                title.visibility = View.VISIBLE
+            }
+
+            private fun bindTitle(details: MediaItem) {
+                val loadKey = "${++artworkGeneration}:title-logo:${details.id}"
+                logo.dispose()
+                logo.tag = loadKey
+                logo.setImageDrawable(null)
+                logo.visibility = View.INVISIBLE
+                logo.contentDescription = details.title
+                title.text = details.title
+                title.visibility = View.VISIBLE
+
+                val tag = details.logoTag?.takeUnless(String::isBlank) ?: return
+                logo.load(
+                    api.logoUrl(
+                        session,
+                        details.id,
+                        tag,
+                        dim(R.dimen.tv_details_logo_width)
+                    )
+                ) {
+                    crossfade(false)
+                    size(
+                        dim(R.dimen.tv_details_logo_width),
+                        dim(R.dimen.tv_details_logo_height)
+                    )
+                    listener(
+                        onSuccess = { _, _ ->
+                            if (!destroyed && logo.tag == loadKey) {
+                                logo.visibility = View.VISIBLE
+                                title.visibility = View.GONE
+                            }
+                        },
+                        onError = { _, _ ->
+                            if (!destroyed && logo.tag == loadKey) {
+                                logo.setImageDrawable(null)
+                                logo.visibility = View.INVISIBLE
+                                title.visibility = View.VISIBLE
+                            }
+                        }
+                    )
+                }
             }
         }
 
@@ -1177,7 +1252,7 @@ class MusicDetailsActivity : AppCompatActivity() {
                             retry,
                             LinearLayout.LayoutParams(
                                 -2,
-                                dim(R.dimen.tv_hero_button_height)
+                                dim(R.dimen.tv_details_action_height)
                             ).apply { topMargin = dim(R.dimen.tv_spacing_medium) }
                         )
                     }

@@ -23,6 +23,7 @@ import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.playback.ConnectionSpeed
 import com.piggie.tv.data.session.NativeSettings
@@ -100,6 +101,7 @@ class SettingsFragment : Fragment() {
             showDiagnostics()
         }
         settingsButton(page, "Sign Out") {
+            MusicPlaybackManager.shutdown()
             DiscoveryManager.clearForLogout()
             MediaDetailsSeedStore.clear()
             store.clear()

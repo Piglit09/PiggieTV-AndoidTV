@@ -1,6 +1,7 @@
 package com.piggie.tv.core
 
 import android.app.Application
+import android.content.Intent
 import androidx.lifecycle.Lifecycle
 import com.piggie.tv.data.api.SessionOrigin
 import com.piggie.tv.data.models.MediaItem
@@ -136,6 +137,37 @@ class PtvHostActivityRouteTransactionTest {
         assertTrue(movies?.isHidden == false)
         assertEquals(Lifecycle.State.RESUMED, movies?.lifecycle?.currentState)
         assertEquals(movies, fragmentManager.primaryNavigationFragment)
+    }
+
+    @Test
+    fun continueWatchingBackHandoffReusesHostAndSelectsHome() {
+        val activity = launchWithCommittedHome()
+        val fragmentManager = activity.supportFragmentManager
+        activity.showRoute(NativeRoute.SHOWS)
+        fragmentManager.executePendingTransactions()
+
+        val handoff = PtvHostActivity.returnHomeIntent(activity)
+        assertEquals(
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            handoff.flags and
+                (Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+        assertEquals(NativeRoute.HOME, PtvHostActivity.requestedRoute(handoff))
+
+        controller!!.newIntent(handoff)
+        fragmentManager.executePendingTransactions()
+        assertNull(PtvHostActivity.requestedRoute(activity.intent))
+
+        val home = fragmentManager.findFragmentByTag("ptv-route-home")
+        assertTrue(home?.isAdded == true)
+        assertTrue(home?.isHidden == false)
+        assertEquals(Lifecycle.State.RESUMED, home?.lifecycle?.currentState)
+        assertEquals(home, fragmentManager.primaryNavigationFragment)
+    }
+
+    @Test
+    fun ordinaryHostIntentDoesNotRequestAPlaybackReturnRoute() {
+        assertNull(PtvHostActivity.requestedRoute(Intent()))
     }
 
     private fun launchWithCommittedHome(): PtvHostActivity {

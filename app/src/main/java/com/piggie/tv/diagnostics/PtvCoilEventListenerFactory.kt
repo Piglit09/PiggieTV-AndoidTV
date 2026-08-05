@@ -29,6 +29,7 @@ object PtvCoilEventListenerFactory : EventListener.Factory {
     const val CATEGORY_PROFILE = "profile"
     const val CATEGORY_DETAILS_BACKDROP = "details_backdrop"
     const val CATEGORY_DETAILS_LOGO = "details_logo"
+    const val CATEGORY_DETAILS_POSTER = "details_poster"
     const val CATEGORY_DETAILS_PERSON = "details_person"
     const val CATEGORY_UNCLASSIFIED = "unclassified"
 }

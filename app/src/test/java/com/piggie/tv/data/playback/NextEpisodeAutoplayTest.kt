@@ -21,6 +21,13 @@ class NextEpisodeAutoplayTest {
     @Test fun countdownShowsInsideThreshold() {
         assertTrue(NextEpisodeAutoplayPolicy.shouldShowOverlay(20_000, guards(), false))
         assertFalse(NextEpisodeAutoplayPolicy.shouldShowOverlay(30_000, guards(), false))
+        assertFalse(
+            NextEpisodeAutoplayPolicy.shouldShowOverlay(
+                20_000,
+                guards(foreground = false),
+                false
+            )
+        )
     }
 
     @Test fun cancelPreventsCountdownAndEndedFallback() {
@@ -31,6 +38,12 @@ class NextEpisodeAutoplayTest {
     @Test fun playNowBypassesDisabledSettingButNotSafetyGuards() {
         assertTrue(NextEpisodeAutoplayPolicy.shouldStart(AutoplayTrigger.PLAY_NOW, guards(enabled = false)))
         assertFalse(NextEpisodeAutoplayPolicy.shouldStart(AutoplayTrigger.PLAY_NOW, guards(error = true)))
+        assertFalse(
+            NextEpisodeAutoplayPolicy.shouldStart(
+                AutoplayTrigger.PLAY_NOW,
+                guards(foreground = false)
+            )
+        )
     }
 
     @Test fun endedFallbackStartsAndDuplicateCallbackDoesNot() {
@@ -74,6 +87,16 @@ class NextEpisodeAutoplayTest {
         val special2 = episode("sp2", 0, 2)
         assertEquals(special2, NextEpisodeSelector.select(special1.id, listOf(special1, special2)))
         assertNull(NextEpisodeSelector.select(special2.id, listOf(special1, special2)))
+    }
+
+    @Test fun previousEpisodeSelectorStaysInOrderedSeriesResponse() {
+        val first = episode("first", 1, 1)
+        val second = episode("second", 1, 2)
+        val third = episode("third", 2, 1)
+
+        assertEquals(second, PreviousEpisodeSelector.select(third.id, listOf(first, second, third)))
+        assertNull(PreviousEpisodeSelector.select(first.id, listOf(first, second, third)))
+        assertNull(PreviousEpisodeSelector.select("outside", listOf(first, second, third)))
     }
 
     private fun episode(id: String, season: Int, number: Int) = MediaItem(

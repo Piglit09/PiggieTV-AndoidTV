@@ -1,5 +1,7 @@
 package com.piggie.tv.data.models
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 data class NativeSession(
     val token: String,
     val serverId: String,
@@ -7,11 +9,13 @@ data class NativeSession(
     val userName: String,
     val serverUrl: String
 ) {
-    fun isComplete(): Boolean =
-        token.isNotBlank() &&
+    fun isComplete(): Boolean {
+        val server = serverUrl.toHttpUrlOrNull()
+        return token.isNotBlank() &&
             serverId.isNotBlank() &&
             userId.isNotBlank() &&
             userName.isNotBlank() &&
-            serverUrl.isNotBlank() &&
-            serverUrl.startsWith("https://")
+            server != null &&
+            (server.isHttps || server.scheme == "http")
+    }
 }

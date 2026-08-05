@@ -61,9 +61,9 @@ class MediaCardTest {
 
     @Test
     fun compactBucketUsesProductionArtworkDimensions() {
-        assertArtworkSize(MediaCardPresentation.POSTER, widthDp = 100, heightDp = 150)
-        assertArtworkSize(MediaCardPresentation.LANDSCAPE, widthDp = 184, heightDp = 104)
-        assertArtworkSize(MediaCardPresentation.SQUARE, widthDp = 112, heightDp = 112)
+        assertArtworkSize(MediaCardPresentation.POSTER, widthDp = 100, heightDp = 144)
+        assertArtworkSize(MediaCardPresentation.LANDSCAPE, widthDp = 184, heightDp = 96)
+        assertArtworkSize(MediaCardPresentation.SQUARE, widthDp = 112, heightDp = 104)
     }
 
     @Test
@@ -204,6 +204,7 @@ class MediaCardTest {
                 session,
                 api
             )
+            assertEquals("movie", card.tag)
             measureCard(card)
             val heightWithProgress = card.measuredHeight
             assertEquals(View.VISIBLE, holder.progress?.visibility)
@@ -417,6 +418,7 @@ class MediaCardTest {
             assertNull(card.contentDescription)
             assertNull(holder.image.contentDescription)
             assertNull(holder.image.tag)
+            assertNull(card.tag)
             assertSame(holder.placeholder, holder.image.drawable)
             assertEquals(View.VISIBLE, holder.image.visibility)
             assertEquals(ImageView.ScaleType.CENTER_CROP, holder.image.scaleType)

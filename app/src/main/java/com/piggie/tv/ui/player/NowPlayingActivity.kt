@@ -82,7 +82,10 @@ class NowPlayingActivity : AppCompatActivity() {
                     title.text = item.title
                     artist.text = item.artists.firstOrNull() ?: item.albumArtist
                     val store = SecureSessionStore(this@NowPlayingActivity)
-                    val session = store.read()!!
+                    val session = store.read() ?: run {
+                        finish()
+                        return@collectLatest
+                    }
                     val api = JellyfinNativeApi(this@NowPlayingActivity)
                     art.load(api.imageUrl(session, item, MediaCardPresentation.SQUARE)) {
                         crossfade(false)

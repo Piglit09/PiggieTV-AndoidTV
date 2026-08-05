@@ -49,6 +49,7 @@ object NextEpisodeAutoplayPolicy {
     ): Boolean = remainingMs in 1..UP_NEXT_THRESHOLD_MS &&
         state.enabled &&
         state.hasNextItem &&
+        state.appForeground &&
         !state.canceled &&
         !state.playbackError &&
         !overlayAlreadyShown
@@ -57,7 +58,7 @@ object NextEpisodeAutoplayPolicy {
         if (!state.hasNextItem || state.playbackError || state.manuallyStoppedEarly || state.transitionAlreadyStarted) {
             return false
         }
-        if (trigger == AutoplayTrigger.PLAY_NOW) return true
+        if (trigger == AutoplayTrigger.PLAY_NOW) return state.appForeground
         return state.enabled && !state.canceled && state.appForeground
     }
 }
@@ -71,5 +72,18 @@ object NextEpisodeSelector {
             .asSequence()
             .drop(currentIndex + 1)
             .firstOrNull { it.type.equals("Episode", ignoreCase = true) && it.id != currentItemId }
+    }
+}
+
+/** Selects the previous episode from Jellyfin's ordered, series-scoped episode response. */
+object PreviousEpisodeSelector {
+    fun select(currentItemId: String, orderedEpisodes: List<MediaItem>): MediaItem? {
+        val currentIndex = orderedEpisodes.indexOfFirst { it.id == currentItemId }
+        if (currentIndex <= 0) return null
+        return orderedEpisodes
+            .asSequence()
+            .take(currentIndex)
+            .filter { it.type.equals("Episode", ignoreCase = true) && it.id != currentItemId }
+            .lastOrNull()
     }
 }

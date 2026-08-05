@@ -12,6 +12,10 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.playback.MUSIC_QUEUE_ENTRY_ID_EXTRA
+import com.piggie.tv.data.playback.MusicPlaybackReportEvent
+import com.piggie.tv.data.playback.MusicPlaybackReportTracker
 import com.piggie.tv.data.playback.PlaybackOriginPolicy
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.diagnostics.PtvAudioTrace
@@ -25,8 +29,10 @@ class AudioPlayerService : MediaSessionService() {
     private lateinit var player: Player
     private val api by lazy { JellyfinNativeApi(this) }
     private val store by lazy { SecureSessionStore(this) }
-    private var reportingHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val reportingHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val reportingIntervalMs = 15_000L
+    private val reportTracker = MusicPlaybackReportTracker()
+    private var reportingSession: NativeSession? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -79,12 +85,68 @@ class AudioPlayerService : MediaSessionService() {
                         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_play_state", serviceState = "running", mediaSessionState = if (isPlaying) "playing" else "paused"))
                         if (isPlaying) startReporting() else stopReporting()
                     }
+                    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                        if (playWhenReady) ensureCurrentItemIsReported()
+                        if (reportTracker.activeItemId != null) {
+                            dispatchReports(
+                                reportTracker.progress(
+                                    positionTicks = player.currentPosition.toTicks(),
+                                    isPaused = !playWhenReady
+                                )
+                            )
+                        }
+                    }
                     override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
                         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_track_transition", currentIndex = this@AudioPlayerService.player.currentMediaItemIndex))
-                        if (mediaItem != null) reportItemStart(mediaItem.mediaId)
+                        dispatchReports(
+                            reportTracker.transitionTo(
+                                itemId = mediaItem?.mediaId,
+                                // Universal audio owns its internal transcode session and does not
+                                // expose that identifier to clients.
+                                playSessionId = "",
+                                entryId = mediaItem?.queueEntryId()
+                            )
+                        )
+                    }
+                    override fun onPositionDiscontinuity(
+                        oldPosition: Player.PositionInfo,
+                        newPosition: Player.PositionInfo,
+                        reason: Int
+                    ) {
+                        val oldItemId = oldPosition.mediaItem?.mediaId
+                        val newItemId = newPosition.mediaItem?.mediaId
+                        val oldEntryId = oldPosition.mediaItem?.queueEntryId()
+                        if (
+                            oldItemId != null &&
+                            oldItemId == reportTracker.activeItemId &&
+                            oldEntryId == reportTracker.activeEntryId &&
+                            (
+                                oldItemId != newItemId ||
+                                oldPosition.mediaItemIndex != newPosition.mediaItemIndex
+                            )
+                        ) {
+                            dispatchReports(
+                                reportTracker.finish(oldPosition.positionMs.toTicks())
+                            )
+                        }
+                    }
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        when (playbackState) {
+                            Player.STATE_IDLE,
+                            Player.STATE_ENDED -> dispatchReports(
+                                reportTracker.finish(player.currentPosition.toTicks())
+                            )
+                            Player.STATE_BUFFERING,
+                            Player.STATE_READY -> if (player.playWhenReady) {
+                                ensureCurrentItemIsReported()
+                            }
+                        }
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("AudioPlayer", "ExoPlayer Error: ${error.message}", error)
+                        dispatchReports(
+                            reportTracker.finish(player.currentPosition.toTicks())
+                        )
                         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_player_error", error = error.errorCodeName))
                     }
                 })
@@ -104,19 +166,70 @@ class AudioPlayerService : MediaSessionService() {
             .build()
     }
 
-    private fun reportItemStart(itemId: String) {
-        val session = store.read() ?: return
-        api.reportPlaying(session, itemId, "", 0L)
-    }
-
     private val reportRunnable = object : Runnable {
         override fun run() {
-            val session = store.read() ?: return
-            val itemId = player.currentMediaItem?.mediaId ?: return
-            val posTicks = player.currentPosition * 10_000
-            val paused = !player.isPlaying
-            api.reportProgress(session, itemId, "", posTicks, paused)
-            reportingHandler.postDelayed(this, reportingIntervalMs)
+            if (player.currentMediaItem == null || reportTracker.activeItemId == null) return
+            dispatchReports(
+                reportTracker.progress(
+                    positionTicks = player.currentPosition.toTicks(),
+                    isPaused = !player.playWhenReady
+                )
+            )
+            if (player.isPlaying) {
+                reportingHandler.postDelayed(this, reportingIntervalMs)
+            }
+        }
+    }
+
+    private fun ensureCurrentItemIsReported() {
+        if (reportTracker.activeItemId != null) return
+        val mediaItem = player.currentMediaItem ?: return
+        dispatchReports(
+            reportTracker.transitionTo(
+                itemId = mediaItem.mediaId,
+                playSessionId = "",
+                entryId = mediaItem.queueEntryId()
+            )
+        )
+    }
+
+    private fun dispatchReports(events: List<MusicPlaybackReportEvent>) {
+        events.forEach { event ->
+            when (event) {
+                is MusicPlaybackReportEvent.Playing -> {
+                    val session = store.read() ?: return@forEach
+                    reportingSession = session
+                    api.reportPlaying(
+                        session,
+                        event.itemId,
+                        event.playSessionId,
+                        event.positionTicks
+                    )
+                }
+                is MusicPlaybackReportEvent.Progress -> {
+                    val session = reportingSession ?: store.read() ?: return@forEach
+                    reportingSession = session
+                    api.reportProgress(
+                        session,
+                        event.itemId,
+                        event.playSessionId,
+                        event.positionTicks,
+                        event.isPaused
+                    )
+                }
+                is MusicPlaybackReportEvent.Stopped -> {
+                    val session = reportingSession ?: store.read()
+                    if (session != null) {
+                        api.reportStopped(
+                            session,
+                            event.itemId,
+                            event.playSessionId,
+                            event.positionTicks
+                        )
+                    }
+                    reportingSession = null
+                }
+            }
         }
     }
 
@@ -133,16 +246,14 @@ class AudioPlayerService : MediaSessionService() {
 
     override fun onDestroy() {
         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_destroyed", serviceState = "destroyed"))
-        val lastItemId = player.currentMediaItem?.mediaId
-        val lastPos = player.currentPosition
-        mediaSession?.run {
-            player.release()
-            release()
-            mediaSession = null
+        stopReporting()
+        if (::player.isInitialized) {
+            dispatchReports(reportTracker.finish(player.currentPosition.toTicks()))
         }
-        val session = store.read()
-        if (session != null && lastItemId != null) {
-            api.reportStopped(session, lastItemId, "", lastPos * 10_000)
+        mediaSession?.release()
+        mediaSession = null
+        if (::player.isInitialized) {
+            player.release()
         }
         super.onDestroy()
     }
@@ -155,4 +266,9 @@ class AudioPlayerService : MediaSessionService() {
             }
         }
     }
+
+    private fun Long.toTicks(): Long = coerceAtLeast(0L) * 10_000L
+
+    private fun androidx.media3.common.MediaItem.queueEntryId(): String? =
+        mediaMetadata.extras?.getString(MUSIC_QUEUE_ENTRY_ID_EXTRA)
 }

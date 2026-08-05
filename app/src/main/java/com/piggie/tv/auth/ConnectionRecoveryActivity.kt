@@ -10,6 +10,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.piggie.tv.R
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.data.discovery.DiscoveryManager
+import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
 
 class ConnectionRecoveryActivity : AppCompatActivity() {
@@ -55,6 +56,7 @@ class ConnectionRecoveryActivity : AppCompatActivity() {
         val signOut = Button(this).apply {
             text = "Sign Out"
             setOnClickListener {
+                MusicPlaybackManager.shutdown()
                 store.clear()
                 DiscoveryManager.clearForLogout()
                 MediaDetailsSeedStore.clear()

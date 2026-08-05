@@ -8,6 +8,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -168,5 +169,220 @@ class JellyfinNativeApiPlaybackRequestTest {
         assertEquals(listOf(2), metadata.audioTracks.map { it.index })
         assertEquals(listOf(3), metadata.subtitleTracks.map { it.index })
         assertEquals(1, metadata.mediaSources.size)
+    }
+
+    @Test
+    fun `episode details request and parse parent navigation and artwork metadata`() {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{
+                    "Id":"episode-4",
+                    "Name":"Fourth Episode",
+                    "Type":"Episode",
+                    "ImageTags":{
+                        "Primary":"episode-primary",
+                        "Backdrop":"episode-backdrop",
+                        "Thumb":"episode-thumb"
+                    },
+                    "BackdropImageTags":["episode-backdrop-1","","episode-backdrop-2"],
+                    "SeriesId":"series-1",
+                    "SeasonId":"season-2",
+                    "SeriesName":"Piggie Show",
+                    "ParentBackdropItemId":"series-1",
+                    "ParentBackdropImageTags":["series-backdrop"],
+                    "ParentLogoItemId":"series-1",
+                    "ParentLogoImageTag":"series-logo",
+                    "ParentPrimaryImageItemId":"series-1",
+                    "ParentPrimaryImageTag":"series-primary",
+                    "ParentThumbItemId":"series-1",
+                    "ParentThumbImageTag":"series-thumb",
+                    "SeriesPrimaryImageTag":"series-primary-direct",
+                    "IndexNumber":4,
+                    "ParentIndexNumber":2
+                }""".trimIndent()
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val item = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadItem(session, "episode-4")
+
+        assertEquals("series-1", item.seriesId)
+        assertEquals("season-2", item.seasonId)
+        assertEquals("Piggie Show", item.seriesName)
+        assertEquals(4, item.indexNumber)
+        assertEquals(2, item.parentIndexNumber)
+        assertEquals("S2 E4", item.episodeLabel)
+        assertEquals("episode-primary", item.imageTag)
+        assertEquals("episode-backdrop", item.backdropTag)
+        assertEquals("episode-thumb", item.thumbImageTag)
+        assertNull(item.logoTag)
+        assertEquals(listOf("episode-backdrop-1", "episode-backdrop-2"), item.backdropImageTags)
+        assertEquals("series-1", item.parentBackdropItemId)
+        assertEquals(listOf("series-backdrop"), item.parentBackdropImageTags)
+        assertEquals("series-1", item.parentLogoItemId)
+        assertEquals("series-logo", item.parentLogoImageTag)
+        assertEquals("series-1", item.parentPrimaryImageItemId)
+        assertEquals("series-primary", item.parentPrimaryImageTag)
+        assertEquals("series-1", item.parentThumbItemId)
+        assertEquals("series-thumb", item.parentThumbImageTag)
+        assertEquals("series-primary-direct", item.seriesPrimaryImageTag)
+
+        val fields = server.takeRequest().requestUrl
+            ?.queryParameter("Fields")
+            .orEmpty()
+            .split(',')
+            .toSet()
+        assertTrue(fields.containsAll(setOf(
+            "SeriesId",
+            "SeasonId",
+            "SeriesName",
+            "IndexNumber",
+            "ParentIndexNumber",
+            "ParentLogoItemId",
+            "ParentLogoImageTag"
+        )))
+    }
+
+    @Test
+    fun `blank own image tags normalize to null`() {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{
+                    "Id":"episode-with-blank-tags",
+                    "Name":"Blank Artwork",
+                    "Type":"Episode",
+                    "ImageTags":{
+                        "Primary":"",
+                        "Backdrop":"   ",
+                        "Logo":"",
+                        "Thumb":"\t"
+                    }
+                }""".trimIndent()
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val item = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadItem(session, "episode-with-blank-tags")
+
+        assertNull(item.imageTag)
+        assertNull(item.backdropTag)
+        assertNull(item.logoTag)
+        assertNull(item.thumbImageTag)
+    }
+
+    @Test
+    fun `episode shelves request inherited artwork metadata`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"Items":[]}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"Items":[]}"""))
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+        val api = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+
+        api.loadEpisodes(session, "series-1", "season-2")
+        api.loadNextUpForSeries(session, "series-1")
+
+        repeat(2) {
+            val fields = server.takeRequest().requestUrl
+                ?.queryParameter("Fields")
+                .orEmpty()
+                .split(',')
+                .toSet()
+            assertTrue(fields.containsAll(setOf(
+                "BackdropImageTags",
+                "ParentBackdropItemId",
+                "ParentBackdropImageTags",
+                "ParentLogoItemId",
+                "ParentLogoImageTag",
+                "ParentPrimaryImageItemId",
+                "ParentPrimaryImageTag",
+                "ParentThumbItemId",
+                "ParentThumbImageTag",
+                "SeriesPrimaryImageTag"
+            )))
+        }
+    }
+
+    @Test
+    fun `season shelf preserves parent identity artwork overview and episode counts`() {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{
+                    "Items":[{
+                        "Id":"season-2",
+                        "Name":"Season 2",
+                        "Type":"Season",
+                        "SeriesId":"series-1",
+                        "SeriesName":"Piggie Show",
+                        "IndexNumber":2,
+                        "Overview":"Eight more episodes.",
+                        "ChildCount":8,
+                        "EpisodeCount":8,
+                        "RecursiveItemCount":8,
+                        "ParentLogoItemId":"series-1",
+                        "ParentLogoImageTag":"series-logo",
+                        "ParentBackdropItemId":"series-1",
+                        "ParentBackdropImageTags":["series-backdrop"]
+                    }]
+                }""".trimIndent()
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val season = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadSeasons(session, "series-1")
+            .single()
+
+        assertEquals("series-1", season.seriesId)
+        assertEquals("Piggie Show", season.seriesName)
+        assertEquals(2, season.indexNumber)
+        assertEquals("Eight more episodes.", season.overview)
+        assertEquals(8, season.childCount)
+        assertEquals(8, season.episodeCount)
+        assertEquals(8, season.recursiveItemCount)
+        assertEquals("series-1", season.parentLogoItemId)
+        assertEquals("series-logo", season.parentLogoImageTag)
+        assertEquals(listOf("series-backdrop"), season.parentBackdropImageTags)
+
+        val fields = server.takeRequest().requestUrl
+            ?.queryParameter("Fields")
+            .orEmpty()
+            .split(',')
+            .toSet()
+        assertTrue(fields.containsAll(setOf(
+            "SeriesName",
+            "SeriesId",
+            "IndexNumber",
+            "Overview",
+            "ChildCount",
+            "EpisodeCount",
+            "RecursiveItemCount",
+            "ParentLogoItemId",
+            "ParentLogoImageTag"
+        )))
     }
 }

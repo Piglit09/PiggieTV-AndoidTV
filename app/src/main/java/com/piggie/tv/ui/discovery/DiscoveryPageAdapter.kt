@@ -155,3 +155,23 @@ object DiscoveryShelfActionPolicy {
         com.piggie.tv.data.discovery.ShelfStatus.RENDER_ERROR
     )
 }
+
+internal enum class DiscoveryMediaAction {
+    VIEW_MORE,
+    RESUME_PLAYBACK,
+    DETAILS
+}
+
+/** Continue Watching is the one discovery shelf whose card press is a playback action. */
+internal object DiscoveryMediaActionPolicy {
+    fun resolve(
+        itemType: String,
+        shelfType: com.piggie.tv.data.discovery.DiscoveryShelfType
+    ): DiscoveryMediaAction = when {
+        itemType.equals("ViewMore", ignoreCase = true) -> DiscoveryMediaAction.VIEW_MORE
+        shelfType == com.piggie.tv.data.discovery.DiscoveryShelfType.CONTINUE_WATCHING &&
+            (itemType.equals("Movie", ignoreCase = true) || itemType.equals("Episode", ignoreCase = true)) ->
+            DiscoveryMediaAction.RESUME_PLAYBACK
+        else -> DiscoveryMediaAction.DETAILS
+    }
+}

@@ -9,6 +9,7 @@ import com.piggie.tv.data.discovery.DiscoveryQueryPlanner
 import com.piggie.tv.data.playback.ImageSizing
 import com.piggie.tv.data.playback.PlaybackProgress
 import com.piggie.tv.data.playback.NextEpisodeSelector
+import com.piggie.tv.data.playback.PreviousEpisodeSelector
 import com.piggie.tv.data.playback.PlaybackDeviceProfile
 import com.piggie.tv.data.playback.PlaybackMediaSourcePolicy
 import com.piggie.tv.util.JellyfinServerUrl
@@ -203,28 +204,56 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadItem(session: NativeSession, itemId: String): MediaItem {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,CriticRating,People"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,Chapters,CriticRating,People,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
         val endpoint = session.serverUrl + "/Users/" + user + "/Items/" + encode(itemId) + "?Fields=" + fields
         return parseItem(JSONObject(request(endpoint, token = session.token)))
     }
 
+    /**
+     * Loads exact intro/outro ranges from Jellyfin's native media-segment endpoint.
+     * Servers without media-segment support may return an HTTP error; callers should then use
+     * the chapter-marker fallback already attached to [MediaItem.playbackSkipSegments].
+     */
+    fun loadPlaybackSkipSegments(
+        session: NativeSession,
+        itemId: String
+    ): List<PlaybackSkipSegment> {
+        val endpoint = session.serverUrl + "/MediaSegments/" + encode(itemId) +
+            "?includeSegmentTypes=Intro&includeSegmentTypes=Outro"
+        return JellyfinPlaybackSkipSegmentParser.parseMediaSegments(
+            request(endpoint, token = session.token)
+        )
+    }
+
     fun loadSeasons(session: NativeSession, seriesId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,SeriesName,SeriesId,IndexNumber,Overview,ChildCount,EpisodeCount,RecursiveItemCount"
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Seasons?UserId=" + user + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadEpisodes(session: NativeSession, seriesId: String, seasonId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Episodes?SeasonId=" + encode(seasonId) + "&UserId=" + user + "&Fields=" + fields
+        return parseItems(request(endpoint, token = session.token))
+    }
+
+    /** Loads the complete series-scoped episode set used by explicit Play All/Shuffle queues. */
+    fun loadSeriesEpisodes(session: NativeSession, seriesId: String): List<MediaItem> {
+        val user = encode(session.userId)
+        // Queue construction needs stable identity/order, duration, and progress only. Requesting
+        // full details artwork, People, Genres, and ratings makes large shows exceed a megabyte and
+        // contend with the visible details requests long enough to reach the client timeout.
+        val fields = "PrimaryImageAspectRatio,ImageTags,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) +
+            "/Episodes?UserId=" + user + "&EnableUserData=true&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadNextUpForSeries(session: NativeSession, seriesId: String): MediaItem? {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber,ParentIndexNumber"
+        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
         val endpoint = session.serverUrl + "/Shows/NextUp?UserId=" + user + "&SeriesId=" + seriesId + "&Fields=" + fields
         return runCatching { parseItems(request(endpoint, token = session.token)).firstOrNull() }.getOrNull()
     }
@@ -251,6 +280,11 @@ class JellyfinNativeApi(private val context: Context) {
         val episodes = parseItems(request(endpoint, token = session.token))
         return NextEpisodeSelector.select(current.id, episodes)
             ?: loadNextUpForSeries(session, seriesId)?.takeIf { it.id != current.id }
+    }
+
+    fun loadPreviousEpisode(session: NativeSession, current: MediaItem): MediaItem? {
+        val seriesId = current.seriesId ?: return null
+        return PreviousEpisodeSelector.select(current.id, loadSeriesEpisodes(session, seriesId))
     }
 
     fun loadHero(session: NativeSession): MediaItem? {
@@ -427,24 +461,78 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     fun reportPlaying(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
-        thread {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.PLAYING
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing", method = "POST", body = payload.toString(), token = session.token) }
+            request(session.serverUrl + "/Sessions/Playing", method = "POST", body = payload.toString(), token = session.token)
         }
     }
 
     fun reportProgress(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long, isPaused: Boolean) {
-        thread {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.PROGRESS
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks); put("IsPaused", isPaused) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token) }
+            request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token)
         }
     }
 
-    fun reportStopped(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
-        thread {
+    fun reportStopped(
+        session: NativeSession,
+        itemId: String,
+        playSessionId: String,
+        positionTicks: Long,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        enqueuePlaybackReport(
+            session,
+            itemId,
+            playSessionId,
+            PlaybackReportKind.STOPPED,
+            onComplete
+        ) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing/Stopped", method = "POST", body = payload.toString(), token = session.token) }
+            var lastFailure: Throwable? = null
+            repeat(2) {
+                val result = runCatching {
+                    request(
+                        session.serverUrl + "/Sessions/Playing/Stopped",
+                        method = "POST",
+                        body = payload.toString(),
+                        token = session.token
+                    )
+                }
+                if (result.isSuccess) return@enqueuePlaybackReport
+                lastFailure = result.exceptionOrNull()
+            }
+            throw requireNotNull(lastFailure)
         }
+    }
+
+    private fun enqueuePlaybackReport(
+        session: NativeSession,
+        itemId: String,
+        playSessionId: String,
+        kind: PlaybackReportKind,
+        onComplete: (Boolean) -> Unit = {},
+        send: () -> Unit
+    ) {
+        playbackReportDispatcher.enqueue(
+            sessionKey = listOf(
+                session.serverUrl,
+                session.userId
+            ).joinToString("\u0000"),
+            kind = kind,
+            send = send,
+            onComplete = onComplete
+        )
     }
 
     fun reportStoppedNow(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
@@ -633,18 +721,19 @@ class JellyfinNativeApi(private val context: Context) {
                 if (person.type == "Director") directorName = person.name
             }
         }
+        val runtimeTicks = item.optLong("RunTimeTicks", 0L)
         return MediaItem(
             id = id,
             title = item.optString("Name").ifBlank { "Untitled" },
             type = item.optString("Type"),
             year = item.optInt("ProductionYear", 0).takeIf { it > 0 }?.toString(),
-            imageTag = imageTags?.optString("Primary"),
-            backdropTag = imageTags?.optString("Backdrop"),
-            logoTag = imageTags?.optString("Logo"),
+            imageTag = imageTags?.nonBlankString("Primary"),
+            backdropTag = imageTags?.nonBlankString("Backdrop"),
+            logoTag = imageTags?.nonBlankString("Logo"),
             seriesName = item.optString("SeriesName").ifBlank { null },
             episodeLabel = label,
             playbackPositionTicks = userData?.optLong("PlaybackPositionTicks", 0L) ?: 0L,
-            runtimeTicks = item.optLong("RunTimeTicks", 0L),
+            runtimeTicks = runtimeTicks,
             overview = item.optString("Overview"),
             communityRating = item.optDouble("CommunityRating", 0.0).toFloat().takeIf { it > 0 },
             officialRating = item.optString("OfficialRating"),
@@ -666,9 +755,27 @@ class JellyfinNativeApi(private val context: Context) {
             criticRating = item.optDouble("CriticRating", 0.0).toFloat().takeIf { it > 0 },
             director = directorName,
             people = people,
+            childCount = item.optInt("ChildCount", -1).takeIf { it >= 0 },
+            episodeCount = item.optInt("EpisodeCount", -1).takeIf { it >= 0 },
+            recursiveItemCount = item.optInt("RecursiveItemCount", -1).takeIf { it >= 0 },
+            backdropImageTags = item.nonBlankStrings("BackdropImageTags"),
+            thumbImageTag = imageTags?.nonBlankString("Thumb"),
+            parentBackdropItemId = item.nonBlankString("ParentBackdropItemId"),
+            parentBackdropImageTags = item.nonBlankStrings("ParentBackdropImageTags"),
+            parentLogoItemId = item.nonBlankString("ParentLogoItemId"),
+            parentLogoImageTag = item.nonBlankString("ParentLogoImageTag"),
+            parentPrimaryImageItemId = item.nonBlankString("ParentPrimaryImageItemId"),
+            parentPrimaryImageTag = item.nonBlankString("ParentPrimaryImageTag"),
+            parentThumbItemId = item.nonBlankString("ParentThumbItemId"),
+            parentThumbImageTag = item.nonBlankString("ParentThumbImageTag"),
+            seriesPrimaryImageTag = item.nonBlankString("SeriesPrimaryImageTag"),
             audioTracks = playbackTracks.audioTracks,
             subtitleTracks = playbackTracks.subtitleTracks,
-            mediaSourceId = playbackTracks.mediaSourceId
+            mediaSourceId = playbackTracks.mediaSourceId,
+            playbackSkipSegments = JellyfinPlaybackSkipSegmentParser.parseChapterMarkers(
+                item,
+                runtimeTicks
+            )
         )
     }
 
@@ -690,8 +797,24 @@ class JellyfinNativeApi(private val context: Context) {
     private fun maskIdentifier(value: String): String = if (value.length <= 8) "****" else value.take(4) + "..." + value.takeLast(4)
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
 
+    private fun JSONObject.nonBlankString(name: String): String? =
+        optString(name).takeUnless(String::isBlank)
+
+    private fun JSONObject.nonBlankStrings(name: String): List<String> {
+        val values = optJSONArray(name) ?: return emptyList()
+        return List(values.length()) { values.optString(it) }.filter(String::isNotBlank)
+    }
+
     private companion object {
+        const val DETAILS_ARTWORK_FIELDS =
+            "BackdropImageTags,ParentBackdropItemId,ParentBackdropImageTags," +
+                "ParentLogoItemId,ParentLogoImageTag,ParentPrimaryImageItemId," +
+                "ParentPrimaryImageTag,ParentThumbItemId,ParentThumbImageTag," +
+                "SeriesPrimaryImageTag"
+
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null
+
+        val playbackReportDispatcher = PlaybackReportDispatcher()
     }
 }

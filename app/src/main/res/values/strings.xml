@@ -78,4 +78,8 @@
     <string name="connection_error_title">Unable to load content</string>
     <string name="connection_error_body">Check your connection and try again.</string>
     <string name="playback_time_zero">0:00</string>
+    <string name="player_previous_episode">Previous Episode</string>
+    <string name="player_restart_episode">Restart Episode</string>
+    <string name="player_next_episode">Next Episode</string>
+    <string name="player_skip_intro">Skip Intro</string>
 </resources>

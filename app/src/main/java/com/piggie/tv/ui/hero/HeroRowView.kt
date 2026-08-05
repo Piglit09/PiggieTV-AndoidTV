@@ -1,6 +1,10 @@
 package com.piggie.tv.ui.hero
 
 import android.graphics.Typeface
+import android.graphics.Outline
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.drawable.ColorDrawable
 import android.os.SystemClock
 import android.util.Log
@@ -8,6 +12,7 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -93,10 +98,24 @@ class HeroRowView(
     private var activeLogoCacheKey: String? = null
     private var preloadedBackdropKey: String? = null
     private var lastMeasurementSignature: String? = null
+    private val useStaticCornerMask = HeroRoundingPolicy.useStaticCornerMask(
+        profile = TvRenderingRuntime.profile(),
+        opaqueRoot = TvRenderingRuntime.features().opaqueRoots
+    )
+    private val cornerMaskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = PTVColors.background
+        style = Paint.Style.FILL
+    }
+    private val cornerMaskPath = Path()
 
     init {
         id = R.id.hero_row
         minimumHeight = context.dim(R.dimen.tv_hero_height)
+        outlineProvider = HeroRoundedOutlineProvider
+        // Clipping this full hierarchy forces the enlarged backdrop, scrim, text, logo and
+        // controls through one rounded GPU clip on every damaged frame. Fire's root is a known
+        // opaque color, so four tiny cached corner masks preserve the same silhouette cheaply.
+        clipToOutline = !useStaticCornerMask
         addView(backdrop, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(overlay, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
@@ -161,6 +180,69 @@ class HeroRowView(
         primary.onFocusChangeListener = focusListener
         details.onFocusChangeListener = focusListener
         render(null)
+    }
+
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        if (useStaticCornerMask) rebuildCornerMask(width, height)
+    }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+        if (useStaticCornerMask && !cornerMaskPath.isEmpty) {
+            canvas.drawPath(cornerMaskPath, cornerMaskPaint)
+        }
+    }
+
+    private fun rebuildCornerMask(width: Int, height: Int) {
+        cornerMaskPath.reset()
+        if (width <= 0 || height <= 0) return
+        val radius = resources.getDimension(R.dimen.tv_hero_corner_radius)
+            .coerceAtMost(width / 2f)
+            .coerceAtMost(height / 2f)
+        if (radius <= 0f) return
+        val control = radius * CIRCLE_CONTROL_FACTOR
+
+        cornerMaskPath.moveTo(0f, 0f)
+        cornerMaskPath.lineTo(radius, 0f)
+        cornerMaskPath.cubicTo(radius - control, 0f, 0f, radius - control, 0f, radius)
+        cornerMaskPath.close()
+
+        cornerMaskPath.moveTo(width.toFloat(), 0f)
+        cornerMaskPath.lineTo(width - radius, 0f)
+        cornerMaskPath.cubicTo(
+            width - radius + control,
+            0f,
+            width.toFloat(),
+            radius - control,
+            width.toFloat(),
+            radius
+        )
+        cornerMaskPath.close()
+
+        cornerMaskPath.moveTo(width.toFloat(), height.toFloat())
+        cornerMaskPath.lineTo(width.toFloat(), height - radius)
+        cornerMaskPath.cubicTo(
+            width.toFloat(),
+            height - radius + control,
+            width - radius + control,
+            height.toFloat(),
+            width - radius,
+            height.toFloat()
+        )
+        cornerMaskPath.close()
+
+        cornerMaskPath.moveTo(0f, height.toFloat())
+        cornerMaskPath.lineTo(radius, height.toFloat())
+        cornerMaskPath.cubicTo(
+            radius - control,
+            height.toFloat(),
+            0f,
+            height - radius + control,
+            0f,
+            height - radius
+        )
+        cornerMaskPath.close()
     }
 
     /** Debug-only physical-layout evidence; contains geometry only, never media identifiers. */
@@ -535,6 +617,7 @@ class HeroRowView(
     private companion object {
         const val HERO_IMAGE_WIDTH = 1280
         const val HERO_IMAGE_HEIGHT = 720
+        const val CIRCLE_CONTROL_FACTOR = 0.5522848f
     }
 
     private data class HeroArtworkRequest(
@@ -542,4 +625,28 @@ class HeroRowView(
         val cacheKey: String,
         val imageType: String
     )
+}
+
+internal object HeroRoundingPolicy {
+    fun useStaticCornerMask(
+        profile: TvRenderingProfile,
+        opaqueRoot: Boolean
+    ): Boolean = profile == TvRenderingProfile.FIRE_TV_PERFORMANCE && opaqueRoot
+}
+
+/** One geometry-only outline shared by every route hero; no mask bitmap or redraw loop. */
+internal object HeroRoundedOutlineProvider : ViewOutlineProvider() {
+    override fun getOutline(view: View, outline: Outline) {
+        if (view.width <= 0 || view.height <= 0) {
+            outline.setEmpty()
+            return
+        }
+        outline.setRoundRect(
+            0,
+            0,
+            view.width,
+            view.height,
+            view.resources.getDimension(R.dimen.tv_hero_corner_radius)
+        )
+    }
 }

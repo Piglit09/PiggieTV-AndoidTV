@@ -54,7 +54,9 @@ data class MediaItem(
     val audioTracks: List<AudioTrack> = emptyList(),
     val subtitleTracks: List<SubtitleTrack> = emptyList(),
     /** Jellyfin source whose stream indices populate [audioTracks] and [subtitleTracks]. */
-    val mediaSourceId: String? = null
+    val mediaSourceId: String? = null,
+    /** Exact intro/outro ranges derived from Jellyfin chapter markers, if supplied. */
+    val playbackSkipSegments: List<PlaybackSkipSegment> = emptyList()
 )
 
 data class Person(

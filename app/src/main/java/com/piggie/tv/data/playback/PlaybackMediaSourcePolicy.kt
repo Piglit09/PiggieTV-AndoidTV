@@ -33,7 +33,8 @@ object PlaybackMediaSourcePolicy {
         preferredMediaSourceId: String? = null,
         audioStreamIndex: Int? = null,
         subtitleStreamIndex: Int? = null,
-        maxAllowedBitrate: Long? = null
+        maxAllowedBitrate: Long? = null,
+        forceTranscode: Boolean = false
     ): List<PlaybackMediaSourcePlan> {
         val hasExplicitTrack = audioStreamIndex != null || subtitleStreamIndex != null
         // Stream indices are scoped to a MediaSource. A matching integer in a different source is
@@ -59,13 +60,17 @@ object PlaybackMediaSourcePolicy {
             val bitrateCapExceeded = maxAllowedBitrate != null &&
                 candidate.bitrate != null &&
                 candidate.bitrate > maxAllowedBitrate
-            val route = PlaybackRoutePolicy.choose(
-                supportsDirectPlay = candidate.supportsDirectPlay,
-                supportsDirectStream = candidate.supportsDirectStream,
-                hasExplicitAudioSelection = audioStreamIndex != null,
-                hasExplicitSubtitleSelection = subtitleStreamIndex != null,
-                bitrateCapExceeded = bitrateCapExceeded
-            )
+            val route = if (forceTranscode) {
+                PlaybackRoute.TRANSCODE
+            } else {
+                PlaybackRoutePolicy.choose(
+                    supportsDirectPlay = candidate.supportsDirectPlay,
+                    supportsDirectStream = candidate.supportsDirectStream,
+                    hasExplicitAudioSelection = audioStreamIndex != null,
+                    hasExplicitSubtitleSelection = subtitleStreamIndex != null,
+                    bitrateCapExceeded = bitrateCapExceeded
+                )
+            }
             if (route == PlaybackRoute.TRANSCODE && !candidate.supportsTranscoding) {
                 return@mapNotNull null
             }
@@ -88,13 +93,15 @@ object PlaybackMediaSourcePolicy {
         preferredMediaSourceId: String? = null,
         audioStreamIndex: Int? = null,
         subtitleStreamIndex: Int? = null,
-        maxAllowedBitrate: Long? = null
+        maxAllowedBitrate: Long? = null,
+        forceTranscode: Boolean = false
     ): PlaybackMediaSourcePlan? = orderedPlans(
         candidates = candidates,
         preferredMediaSourceId = preferredMediaSourceId,
         audioStreamIndex = audioStreamIndex,
         subtitleStreamIndex = subtitleStreamIndex,
-        maxAllowedBitrate = maxAllowedBitrate
+        maxAllowedBitrate = maxAllowedBitrate,
+        forceTranscode = forceTranscode
     ).firstOrNull()
 
     private fun routePreference(route: PlaybackRoute): Int = when (route) {

@@ -28,4 +28,22 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <Button
+        android:id="@+id/player_skip_segment_btn"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/tv_nav_button_height"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="40dp"
+        android:background="@drawable/tv_button_primary"
+        android:fontFamily="sans-serif-medium"
+        android:minWidth="128dp"
+        android:paddingHorizontal="20dp"
+        android:text="@string/player_skip_intro"
+        android:textAllCaps="false"
+        android:textColor="#FFFFFF"
+        android:textSize="@dimen/tv_nav_text_size"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

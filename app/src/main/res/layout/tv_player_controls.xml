@@ -74,6 +74,16 @@
             android:layout_marginTop="12dp"
             android:orientation="horizontal">
 
+            <ImageButton android:id="@+id/player_previous_episode_btn"
+                android:layout_width="@dimen/tv_player_secondary_control"
+                android:layout_height="@dimen/tv_player_secondary_control"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:background="@drawable/tv_player_button_bg"
+                android:src="@drawable/ic_player_previous"
+                android:nextFocusRight="@id/exo_rew"
+                android:contentDescription="@string/player_previous_episode" />
+
             <ImageButton android:id="@id/exo_rew"
                 android:layout_width="@dimen/tv_player_secondary_control"
                 android:layout_height="@dimen/tv_player_secondary_control"
@@ -81,6 +91,7 @@
                 android:scaleType="fitCenter"
                 android:background="@drawable/tv_player_button_bg"
                 android:src="@android:drawable/ic_media_rew"
+                android:nextFocusLeft="@id/player_previous_episode_btn"
                 android:nextFocusRight="@id/exo_play_pause"
                 android:contentDescription="Rewind 10s" />
 
@@ -93,8 +104,19 @@
                 android:background="@drawable/tv_player_button_bg"
                 android:src="@android:drawable/ic_media_play"
                 android:nextFocusLeft="@id/exo_rew"
-                android:nextFocusRight="@id/exo_ffwd"
+                android:nextFocusRight="@id/player_restart_episode_btn"
                 android:contentDescription="Play/Pause" />
+
+            <ImageButton android:id="@+id/player_restart_episode_btn"
+                android:layout_width="@dimen/tv_player_secondary_control"
+                android:layout_height="@dimen/tv_player_secondary_control"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:background="@drawable/tv_player_button_bg"
+                android:src="@drawable/ic_player_restart"
+                android:nextFocusLeft="@id/exo_play_pause"
+                android:nextFocusRight="@id/exo_ffwd"
+                android:contentDescription="@string/player_restart_episode" />
 
             <ImageButton android:id="@id/exo_ffwd"
                 android:layout_width="@dimen/tv_player_secondary_control"
@@ -103,9 +125,20 @@
                 android:scaleType="fitCenter"
                 android:background="@drawable/tv_player_button_bg"
                 android:src="@android:drawable/ic_media_ff"
-                android:nextFocusLeft="@id/exo_play_pause"
-                android:nextFocusRight="@id/player_audio_btn"
+                android:nextFocusLeft="@id/player_restart_episode_btn"
+                android:nextFocusRight="@id/player_next_episode_btn"
                 android:contentDescription="Forward 30s" />
+
+            <ImageButton android:id="@+id/player_next_episode_btn"
+                android:layout_width="@dimen/tv_player_secondary_control"
+                android:layout_height="@dimen/tv_player_secondary_control"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:background="@drawable/tv_player_button_bg"
+                android:src="@drawable/ic_player_next"
+                android:nextFocusLeft="@id/exo_ffwd"
+                android:nextFocusRight="@id/player_audio_btn"
+                android:contentDescription="@string/player_next_episode" />
 
             <ImageButton android:id="@id/player_audio_btn"
                 android:layout_width="@dimen/tv_player_secondary_control"
@@ -115,7 +148,7 @@
                 android:scaleType="fitCenter"
                 android:background="@drawable/tv_player_button_bg"
                 android:src="@drawable/ic_player_audio"
-                android:nextFocusLeft="@id/exo_ffwd"
+                android:nextFocusLeft="@id/player_next_episode_btn"
                 android:nextFocusRight="@id/player_subtitles_btn"
                 android:contentDescription="Audio" />
 

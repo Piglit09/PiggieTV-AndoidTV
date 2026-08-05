@@ -23,4 +23,14 @@ class HomeDiscoveryQueryManifestTest {
         assertTrue(home.takeLast(2).all { it.type == DiscoveryShelfType.RANDOM_GENRE })
         assertFalse(home.any { it.title.contains("Collection", true) })
     }
+
+    @Test fun showsContinueWatchingRequestsPlayableEpisodes() {
+        val definition = DiscoveryManager.manifest(DiscoveryPage.SHOWS).shelves
+            .single { it.id == "shows.continue" }
+        val plan = DiscoveryManager.queryManifest(definition)
+
+        assertEquals(listOf("Episode"), definition.itemTypes)
+        assertEquals("Episode", plan.filters["IncludeItemTypes"])
+        assertEquals("/Users/[user]/Items/Resume", plan.endpoint)
+    }
 }

@@ -90,4 +90,27 @@ class PlaybackUrlQueryTest {
 
         assertEquals(once, PlaybackUrlQuery.set(once, "AudioStreamIndex", "5"))
     }
+
+    @Test
+    fun `get reads an absolute URL query name case insensitively`() {
+        assertEquals(
+            "123450000",
+            PlaybackUrlQuery.get(
+                "https://media.example.test/Videos/item/stream" +
+                    "?MediaSourceId=source&sTaRtTiMeTiCkS=123450000#playback",
+                "STARTTIMETICKS"
+            )
+        )
+    }
+
+    @Test
+    fun `get reads a relative URL query name case insensitively`() {
+        assertEquals(
+            "987650000",
+            PlaybackUrlQuery.get(
+                "/Videos/item/stream?before=1&STARTtimeTICKS=987650000&after=2#preview",
+                "StartTimeTicks"
+            )
+        )
+    }
 }

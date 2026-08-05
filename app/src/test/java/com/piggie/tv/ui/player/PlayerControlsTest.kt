@@ -6,6 +6,8 @@ import android.widget.Button
 import android.widget.ImageButton
 import androidx.appcompat.app.AppCompatActivity
 import com.piggie.tv.R
+import com.piggie.tv.data.models.PlaybackSkipSegment
+import com.piggie.tv.data.models.PlaybackSkipSegmentType
 import com.piggie.tv.ui.widgets.PtvSelectionDialog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -29,15 +31,82 @@ class PlayerControlsTest {
         val audio = controls.findViewById<ImageButton>(R.id.player_audio_btn)
         val subtitles = controls.findViewById<ImageButton>(R.id.player_subtitles_btn)
         val speed = controls.findViewById<ImageButton>(R.id.player_connection_speed_btn)
+        val previous = controls.findViewById<ImageButton>(R.id.player_previous_episode_btn)
+        val restart = controls.findViewById<ImageButton>(R.id.player_restart_episode_btn)
+        val next = controls.findViewById<ImageButton>(R.id.player_next_episode_btn)
 
         assertNotNull(audio)
         assertNotNull(subtitles)
         assertNotNull(speed)
+        assertNotNull(previous)
+        assertNotNull(restart)
+        assertNotNull(next)
+        assertEquals("Previous Episode", previous.contentDescription)
+        assertEquals("Restart Episode", restart.contentDescription)
+        assertEquals("Next Episode", next.contentDescription)
         assertEquals("Audio", audio.contentDescription)
         assertEquals("Subtitles", subtitles.contentDescription)
         assertEquals("Connection Speed", speed.contentDescription)
         assertEquals(R.id.player_subtitles_btn, audio.nextFocusRightId)
         assertEquals(R.id.player_connection_speed_btn, subtitles.nextFocusRightId)
+        assertEquals(androidx.media3.ui.R.id.exo_rew, previous.nextFocusRightId)
+        assertEquals(
+            R.id.player_restart_episode_btn,
+            controls.findViewById<ImageButton>(androidx.media3.ui.R.id.exo_play_pause).nextFocusRightId
+        )
+        assertEquals(R.id.player_audio_btn, next.nextFocusRightId)
+    }
+
+    @Test
+    fun `skip segment control uses exact active server range`() {
+        val intro = PlaybackSkipSegment(
+            PlaybackSkipSegmentType.INTRO,
+            startTicks = 10_000_000L,
+            endTicks = 75_000_000L
+        )
+        val outro = PlaybackSkipSegment(
+            PlaybackSkipSegmentType.OUTRO,
+            startTicks = 500_000_000L,
+            endTicks = 600_000_000L
+        )
+
+        assertNull(PlayerSkipSegmentPolicy.activeSegment(listOf(intro, outro), 999L))
+        assertEquals(intro, PlayerSkipSegmentPolicy.activeSegment(listOf(intro, outro), 1_000L))
+        assertEquals("Skip Intro", PlayerSkipSegmentPolicy.label(intro))
+        assertEquals("Skip Outro", PlayerSkipSegmentPolicy.label(outro))
+        assertEquals(7_500L, PlayerSkipSegmentPolicy.targetPositionMs(intro, durationMs = 60_000L))
+        assertNull(
+            PlayerSkipSegmentPolicy.targetPositionMs(
+                intro.copy(endTicks = intro.startTicks),
+                durationMs = 60_000L
+            )
+        )
+    }
+
+    @Test
+    fun `continue watching natural end opens details while explicit back returns home`() {
+        assertEquals(
+            PlaybackExitDestination.DETAILS,
+            PlaybackExitPolicy.afterNaturalCompletion(PlaybackLaunchOrigin.CONTINUE_WATCHING)
+        )
+        assertEquals(
+            PlaybackExitDestination.HOME,
+            PlaybackExitPolicy.afterUserBack(PlaybackLaunchOrigin.CONTINUE_WATCHING)
+        )
+        assertEquals(
+            PlaybackExitDestination.BACK_STACK,
+            PlaybackExitPolicy.afterNaturalCompletion(PlaybackLaunchOrigin.DEFAULT)
+        )
+        assertEquals(
+            PlaybackExitDestination.BACK_STACK,
+            PlaybackExitPolicy.afterUserBack(PlaybackLaunchOrigin.DEFAULT)
+        )
+
+        val completion = PlaybackNaturalCompletionState()
+        assertTrue(completion.claim())
+        assertFalse(completion.claim())
+        completion.reset()
+        assertTrue(completion.claim())
     }
 
     @Test
@@ -122,6 +191,19 @@ class PlayerControlsTest {
             as PlaybackStopReportDecision.Claimed
 
         assertEquals(0L, result.report.positionTicks)
+    }
+
+    @Test
+    fun `failed stop report can be claimed for retry`() {
+        val state = PlaybackStopReportState()
+        val first = state.begin("movie-1", "session-1", 123L)
+            as PlaybackStopReportDecision.Claimed
+
+        state.failed(first.report)
+
+        val retry = state.begin("movie-1", "session-1", 456L)
+            as PlaybackStopReportDecision.Claimed
+        assertEquals(456L, retry.report.positionTicks)
     }
 
     @Test

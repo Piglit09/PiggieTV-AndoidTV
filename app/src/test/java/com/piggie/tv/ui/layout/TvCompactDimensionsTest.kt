@@ -21,6 +21,6 @@ class TvCompactDimensionsTest {
     @Test fun compactBaselineIsCanonicalAndNotPercentageDerived() {
         assertEquals(960, TvCompactTargets.CANVAS_WIDTH_DP)
         assertEquals(540, TvCompactTargets.CANVAS_HEIGHT_DP)
-        assertEquals(170, TvCompactTargets.HERO_HEIGHT_DP)
+        assertEquals(215, TvCompactTargets.HERO_HEIGHT_DP)
     }
 }

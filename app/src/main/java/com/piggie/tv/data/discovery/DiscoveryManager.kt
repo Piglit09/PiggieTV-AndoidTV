@@ -845,7 +845,7 @@ object DiscoveryManager {
             )
             "SHOWS" -> listOf(
                 ShelfDefinition("shows.added", DiscoveryShelfType.RECENTLY_ADDED, "Recently Added", MediaCardPresentation.POSTER, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.RECENTLY_ADDED)),
-                ShelfDefinition("shows.continue", DiscoveryShelfType.CONTINUE_WATCHING, "Continue Watching", MediaCardPresentation.LANDSCAPE, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.CONTINUE_WATCHING)),
+                ShelfDefinition("shows.continue", DiscoveryShelfType.CONTINUE_WATCHING, "Continue Watching", MediaCardPresentation.LANDSCAPE, listOf("Episode"), filter = DiscoveryFilter(DiscoveryFilterType.CONTINUE_WATCHING)),
                 ShelfDefinition("shows.popular", DiscoveryShelfType.POPULAR, "Popular Shows", MediaCardPresentation.POSTER, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.POPULAR)),
                 ShelfDefinition("shows.anime", DiscoveryShelfType.LIBRARY_SPECIFIC, "Anime", MediaCardPresentation.POSTER, listOf("Series"), libraryName = "Anime", filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Anime")),
                 ShelfDefinition("shows.cartoons", DiscoveryShelfType.LIBRARY_SPECIFIC, "Cartoons", MediaCardPresentation.POSTER, listOf("Series"), libraryName = "Cartoons", filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Cartoons")),

@@ -1,6 +1,71 @@
 package com.piggie.tv.ui.player
 
+import com.piggie.tv.data.models.PlaybackSkipSegment
+import com.piggie.tv.data.models.PlaybackSkipSegmentType
 import java.util.concurrent.ConcurrentHashMap
+
+enum class PlaybackLaunchOrigin {
+    DEFAULT,
+    CONTINUE_WATCHING
+}
+
+internal enum class PlaybackExitDestination {
+    BACK_STACK,
+    HOME,
+    DETAILS
+}
+
+internal object PlaybackExitPolicy {
+    fun afterNaturalCompletion(origin: PlaybackLaunchOrigin): PlaybackExitDestination =
+        if (origin == PlaybackLaunchOrigin.CONTINUE_WATCHING) {
+            PlaybackExitDestination.DETAILS
+        } else {
+            PlaybackExitDestination.BACK_STACK
+        }
+
+    fun afterUserBack(origin: PlaybackLaunchOrigin): PlaybackExitDestination =
+        if (origin == PlaybackLaunchOrigin.CONTINUE_WATCHING) {
+            PlaybackExitDestination.HOME
+        } else {
+            PlaybackExitDestination.BACK_STACK
+        }
+}
+
+internal class PlaybackNaturalCompletionState {
+    private val handled = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun claim(): Boolean = handled.compareAndSet(false, true)
+
+    fun reset() {
+        handled.set(false)
+    }
+}
+
+internal object PlayerSkipSegmentPolicy {
+    fun activeSegment(
+        segments: List<PlaybackSkipSegment>,
+        positionMs: Long
+    ): PlaybackSkipSegment? {
+        val positionTicks = PlayerRestartPolicy.positionTicks(positionMs)
+        return segments
+            .asSequence()
+            .filter(PlaybackSkipSegment::isValid)
+            .filter { positionTicks >= it.startTicks && positionTicks < it.endTicks }
+            .minByOrNull(PlaybackSkipSegment::endTicks)
+    }
+
+    fun targetPositionMs(segment: PlaybackSkipSegment, durationMs: Long): Long? {
+        if (!segment.isValid) return null
+        val targetMs = segment.endTicks / PlayerRestartPolicy.TICKS_PER_MILLISECOND
+        if (targetMs <= 0L) return null
+        return if (durationMs > 0L) targetMs.coerceAtMost(durationMs) else targetMs
+    }
+
+    fun label(segment: PlaybackSkipSegment): String = when (segment.type) {
+        PlaybackSkipSegmentType.INTRO -> "Skip Intro"
+        PlaybackSkipSegmentType.OUTRO -> "Skip Outro"
+    }
+}
 
 object PlayerRestartPolicy {
     const val TICKS_PER_MILLISECOND = 10_000L
@@ -55,6 +120,13 @@ internal class PlaybackStopReportState {
             SessionKey(report.itemId, report.playSessionId),
             Status.IN_FLIGHT,
             Status.COMPLETE
+        )
+    }
+
+    fun failed(report: PlaybackStopReport) {
+        sessions.remove(
+            SessionKey(report.itemId, report.playSessionId),
+            Status.IN_FLIGHT
         )
     }
 }
