@@ -1,6 +1,7 @@
 package com.piggie.tv.data.playback
 
 import android.media.MediaCodecList
+import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -78,7 +79,9 @@ object PlaybackDeviceProfile {
         capabilities: PlaybackCodecCapabilities
     ): JSONObject = JSONObject().apply {
         require(maxBitrate > 0) { "maxBitrate must be positive" }
-        val videoCodecs = capabilities.videoCodecs.ifEmpty { setOf("h264") }.sorted()
+        val videoCodecs = sanitizeVideoCodecs(
+            capabilities.videoCodecs.ifEmpty { setOf("h264") }
+        ).sorted()
         val audioCodecs = capabilities.audioCodecs.ifEmpty { setOf("aac") }.sorted()
         put("MaxStreamingBitrate", maxBitrate)
         put("MaxVideoBitrate", maxBitrate)
@@ -119,6 +122,20 @@ object PlaybackDeviceProfile {
                 put(JSONObject().put("Format", format).put("Method", "Encode"))
             }
         })
+    }
+
+    private fun sanitizeVideoCodecs(videoCodecs: Set<String>): Set<String> {
+        if (!isAftSeriesFireTvModel()) return videoCodecs
+        return videoCodecs - "vp8"
+    }
+
+    private fun isAftSeriesFireTvModel(): Boolean {
+        val manufacturer = Build.MANUFACTURER.trim().lowercase()
+        val brand = Build.BRAND.trim().lowercase()
+        val model = Build.MODEL.trim().lowercase()
+        val product = Build.PRODUCT.trim().lowercase()
+        return (manufacturer == "amazon" || brand == "amazon") &&
+            (model.startsWith("aft") || product.startsWith("aft") || product.startsWith("karat"))
     }
 
     private fun audioDirectPlayProfiles(audioCodecs: Set<String>): List<JSONObject> = buildList {

@@ -20,8 +20,8 @@ android {
         applicationId = "com.piggie.tv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.8.6-beta.1"
+        versionCode = 5
+        versionName = "0.8.6-beta.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
