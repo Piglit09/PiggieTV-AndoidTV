@@ -2,6 +2,7 @@ package com.piggie.tv.ui.music
 
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -25,7 +26,9 @@ import com.piggie.tv.data.models.MediaShelf
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.music.MusicAffinityAssembler
 import com.piggie.tv.data.music.MusicAffinityScorer
+import com.piggie.tv.data.music.MusicListeningSignalPolicy
 import com.piggie.tv.data.playback.MusicPlaybackManager
+import com.piggie.tv.data.recommendations.PremiumRecommendationRanker
 import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
@@ -73,6 +76,7 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
     @Volatile private var loadGeneration = 0
     private var artworkFallbacks = emptyMap<String, List<MediaItem>>()
     private var loadExecutor: ExecutorService? = null
+    private var signalExecutor: ExecutorService? = null
     private var loadFuture: Future<*>? = null
 
     override fun onCreateView(
@@ -83,6 +87,9 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
         destroyed = false
         loadExecutor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "ptv-music-home")
+        }
+        signalExecutor = Executors.newFixedThreadPool(4) { runnable ->
+            Thread(runnable, "ptv-music-signals")
         }
         session = (activity as? PtvHostActivity)?.session ?: requireNotNull(store.read())
         root = FrameLayout(requireContext()).apply {
@@ -157,6 +164,8 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
         api.cancelInFlight()
         loadExecutor?.shutdownNow()
         loadExecutor = null
+        signalExecutor?.shutdownNow()
+        signalExecutor = null
         initialHeroVisibilitySampler?.detach()
         initialHeroVisibilitySampler = null
         shelfCoordinator?.detach()
@@ -197,9 +206,34 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
             }.onFailure { primaryFailure = it }
             if (!active()) return@loadTask
 
-            val catalogArtists = runCatching {
+            val parallel = signalExecutor ?: return@loadTask
+            val catalogArtistsFuture = parallel.submit<List<MediaItem>> {
                 api.loadArtists(session, limit = ARTIST_LIMIT)
-            }.getOrDefault(emptyList())
+            }
+            val recentTracksFuture = parallel.submit<List<MediaItem>> {
+                api.loadRecentMusicSignals(session, SIGNAL_LIMIT)
+            }
+            val frequentTracksFuture = parallel.submit<List<MediaItem>> {
+                api.loadFrequentMusicSignals(session, SIGNAL_LIMIT)
+            }
+            val favoriteArtistsFuture = parallel.submit<List<MediaItem>> {
+                api.loadFavoriteArtists(session, FAVORITE_ARTIST_LIMIT)
+            }
+            val cachedRecentAlbums = loadedShelves[
+                normalizeShelfTitle(RECENTLY_ADDED_ALBUMS_TITLE)
+            ]?.items.orEmpty()
+            val recentAlbumsFuture = parallel.submit<List<MediaItem>> {
+                cachedRecentAlbums.ifEmpty {
+                    api.loadAlbums(
+                        session = session,
+                        limit = ALBUM_RESOLUTION_LIMIT,
+                        sortBy = "DateCreated",
+                        sortOrder = "Descending"
+                    )
+                }
+            }
+
+            val catalogArtists = runCatching { catalogArtistsFuture.get() }.getOrDefault(emptyList())
             if (!active()) return@loadTask
             if (catalogArtists.isNotEmpty()) {
                 val shelf = MediaShelf(
@@ -213,34 +247,63 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
                 }
             }
 
-            val recentTracks = runCatching {
-                api.loadRecentMusicSignals(session, SIGNAL_LIMIT)
-            }.getOrElse {
+            val recentTracks = runCatching { recentTracksFuture.get() }.getOrElse {
                 loadedShelves[normalizeShelfTitle(RECENTLY_PLAYED_TITLE)]
                     ?.items
                     .orEmpty()
             }
             if (!active()) return@loadTask
-            val frequentTracks = runCatching {
-                api.loadFrequentMusicSignals(session, SIGNAL_LIMIT)
-            }.getOrDefault(emptyList())
+            val frequentTracks = runCatching { frequentTracksFuture.get() }.getOrDefault(emptyList())
             if (!active()) return@loadTask
-            val favoriteArtists = runCatching {
-                api.loadFavoriteArtists(session, FAVORITE_ARTIST_LIMIT)
-            }.getOrDefault(catalogArtists.filter(MediaItem::isFavorite))
-            if (!active()) return@loadTask
-            val recentAlbums = loadedShelves[
-                normalizeShelfTitle(RECENTLY_ADDED_ALBUMS_TITLE)
-            ]?.items.orEmpty().ifEmpty {
-                runCatching {
-                    api.loadAlbums(
-                        session = session,
-                        limit = ALBUM_RESOLUTION_LIMIT,
-                        sortBy = "DateCreated",
-                        sortOrder = "Descending"
-                    )
+            val mixSeed = MusicListeningSignalPolicy.recent(recentTracks).firstOrNull()
+                ?: MusicListeningSignalPolicy.frequent(frequentTracks).firstOrNull()
+            if (mixSeed != null) {
+                val generationStartedAt = SystemClock.elapsedRealtime()
+                val mixCandidates = runCatching {
+                    api.loadInstantMix(session, mixSeed.id, MIX_CANDIDATE_LIMIT)
                 }.getOrDefault(emptyList())
+                if (!active()) return@loadTask
+                val mixItems = PremiumRecommendationRanker.rankMusicMix(
+                    seed = mixSeed,
+                    candidates = mixCandidates + recentTracks + frequentTracks,
+                    limit = MIX_SHELF_LIMIT,
+                    sessionSeed = listOf(
+                        session.serverId,
+                        session.userId,
+                        System.currentTimeMillis() / MILLIS_PER_DAY
+                    ).joinToString(":")
+                )
+                PtvDiagnosticsManager.event(
+                    "music",
+                    "recommendation_generation",
+                    mapOf(
+                        "surface" to "made_for_you",
+                        "policy" to "familiar70_discovery30",
+                        "serverCandidates" to mixCandidates.size.toString(),
+                        "signalCandidates" to (recentTracks.size + frequentTracks.size).toString(),
+                        "resultCount" to mixItems.size.toString(),
+                        "fallbackUsed" to mixCandidates.isEmpty().toString(),
+                        "latencyMs" to (SystemClock.elapsedRealtime() - generationStartedAt).toString()
+                    )
+                )
+                if (mixItems.isNotEmpty()) {
+                    val shelf = MediaShelf(
+                        title = MADE_FOR_YOU_TITLE,
+                        items = mixItems,
+                        presentation = MediaCardPresentation.SQUARE
+                    )
+                    loadedShelves[normalizeShelfTitle(shelf.title)] = shelf
+                    activity?.runOnUiThread {
+                        if (isCurrent(generation)) pageAdapter.update(shelf)
+                    }
+                }
             }
+            if (!active()) return@loadTask
+            val favoriteArtists = runCatching { favoriteArtistsFuture.get() }
+                .getOrDefault(catalogArtists.filter(MediaItem::isFavorite))
+            if (!active()) return@loadTask
+            val recentAlbums = runCatching { recentAlbumsFuture.get() }
+                .getOrDefault(cachedRecentAlbums)
             if (!active()) return@loadTask
             if (
                 recentAlbums.isNotEmpty() &&
@@ -273,11 +336,10 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
                         .take(ALBUM_RESOLUTION_LIMIT)
                 )
             }.filterNot(knownIds::contains)
-            val resolvedItems = buildList {
-                for (id in unresolvedIds) {
-                    if (!active()) return@loadTask
-                    runCatching { api.loadItem(session, id) }.getOrNull()?.let(::add)
-                }
+            val resolvedItems = if (active()) {
+                runCatching { api.loadItems(session, unresolvedIds) }.getOrDefault(emptyList())
+            } else {
+                return@loadTask
             }
             if (!active()) return@loadTask
             val affinity = MusicAffinityAssembler.assemble(
@@ -755,7 +817,11 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
         const val FAVORITE_ARTIST_LIMIT = 24
         const val ARTIST_RESOLUTION_LIMIT = 5
         const val ALBUM_RESOLUTION_LIMIT = 12
+        const val MIX_CANDIDATE_LIMIT = 64
+        const val MIX_SHELF_LIMIT = 24
+        const val MILLIS_PER_DAY = 86_400_000L
         const val RECENTLY_PLAYED_TITLE = "Recently played"
+        const val MADE_FOR_YOU_TITLE = "Made for You Mix"
         const val RECENTLY_ADDED_ALBUMS_TITLE = "Recently added albums"
         const val ARTISTS_TITLE = "Artists"
 
@@ -763,6 +829,11 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
             MusicShelfDefinition(
                 "music.recent",
                 RECENTLY_PLAYED_TITLE,
+                MediaCardPresentation.SQUARE
+            ),
+            MusicShelfDefinition(
+                "music.mix.personal",
+                MADE_FOR_YOU_TITLE,
                 MediaCardPresentation.SQUARE
             ),
             MusicShelfDefinition(
@@ -783,6 +854,11 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
             MusicShelfDefinition(
                 "music.artists",
                 ARTISTS_TITLE,
+                MediaCardPresentation.SQUARE
+            ),
+            MusicShelfDefinition(
+                "music.playlists",
+                "Playlists",
                 MediaCardPresentation.SQUARE
             )
         )

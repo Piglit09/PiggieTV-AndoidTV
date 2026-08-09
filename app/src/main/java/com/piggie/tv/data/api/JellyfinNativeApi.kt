@@ -16,8 +16,12 @@ import com.piggie.tv.util.JellyfinServerUrl
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.util.UUID
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 private const val LOG_TAG = "JellyfinApi"
@@ -73,12 +77,29 @@ class JellyfinNativeApi(private val context: Context) {
     private val transport by lazy { NativeHttpTransport(::authorization) }
     private val requestScope = ThreadLocal<NativeRequestScope?>()
     private val parseDurationMs = ThreadLocal<Long?>()
+    private val categorySearchCacheLock = Any()
+    private val categorySearchCache = LinkedHashMap<CategorySearchCacheKey, CategorySearchCacheEntry>(
+        16,
+        0.75f,
+        true
+    )
 
-    fun withRequestScope(scope: NativeRequestScope, action: () -> Unit) {
+    private data class CategorySearchCacheKey(
+        val serverId: String,
+        val userId: String,
+        val query: String
+    )
+
+    private data class CategorySearchCacheEntry(
+        val storedAtNanos: Long,
+        val items: List<MediaItem>
+    )
+
+    fun <T> withRequestScope(scope: NativeRequestScope, action: () -> T): T {
         val previous = requestScope.get()
         requestScope.set(scope)
         try {
-            action()
+            return action()
         } finally {
             if (previous == null) {
                 requestScope.remove()
@@ -141,7 +162,8 @@ class JellyfinNativeApi(private val context: Context) {
         val user = JSONObject(request(session.serverUrl + "/Users/" + encode(session.userId), token = session.token))
         return session.copy(
             userId = user.optString("Id").ifBlank { session.userId },
-            userName = user.optString("Name").ifBlank { session.userName }
+            userName = user.optString("Name").ifBlank { session.userName },
+            isAdministrator = isAdministrator(user)
         )
     }
 
@@ -204,9 +226,25 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadItem(session: NativeSession, itemId: String): MediaItem {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,MediaSources,Chapters,CriticRating,People,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
-        val endpoint = session.serverUrl + "/Users/" + user + "/Items/" + encode(itemId) + "?Fields=" + fields
+        val endpoint = session.serverUrl + "/Users/" + user + "/Items/" + encode(itemId) + "?Fields=" + ITEM_RESOLUTION_FIELDS
         return parseItem(JSONObject(request(endpoint, token = session.token)))
+    }
+
+    /** Resolves multiple exact Jellyfin items with one request per bounded ID batch. */
+    fun loadItems(session: NativeSession, itemIds: List<String>): List<MediaItem> {
+        val batches = ItemResolutionBatchPolicy.batches(itemIds)
+        if (batches.isEmpty()) return emptyList()
+        val resolved = batches.flatMap { batch ->
+            fetchItems(
+                session,
+                mapOf(
+                    "Ids" to batch.joinToString(","),
+                    "Fields" to ITEM_RESOLUTION_FIELDS,
+                    "Limit" to batch.size.toString()
+                )
+            )
+        }.distinctBy(MediaItem::id)
+        return ItemResolutionBatchPolicy.restoreRequestOrder(itemIds, resolved)
     }
 
     /**
@@ -235,9 +273,56 @@ class JellyfinNativeApi(private val context: Context) {
     fun loadEpisodes(session: NativeSession, seriesId: String, seasonId: String): List<MediaItem> {
         val user = encode(session.userId)
         val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
-        val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Episodes?SeasonId=" + encode(seasonId) + "&UserId=" + user + "&Fields=" + fields
-        return parseItems(request(endpoint, token = session.token))
+        val normalizedSeriesId = seriesId.trim()
+        val normalizedSeasonId = seasonId.trim()
+        require(normalizedSeriesId.isNotEmpty()) { "Series id is required" }
+        require(normalizedSeasonId.isNotEmpty()) { "Season id is required" }
+
+        val showsEndpoint = session.serverUrl + "/Shows/" + encode(normalizedSeriesId) +
+            "/Episodes?SeasonId=" + encode(normalizedSeasonId) + "&UserId=" + user +
+            "&EnableUserData=true&Fields=" + fields
+        val showsResult = runCatching {
+            parseItems(request(showsEndpoint, token = session.token))
+        }
+        val showsEpisodes = showsResult.getOrNull()?.let {
+            normalizeSeasonEpisodes(it, normalizedSeriesId, normalizedSeasonId)
+        }
+        if (!showsEpisodes.isNullOrEmpty()) return showsEpisodes
+
+        // Jellyfin can expose a Season while its Shows controller returns an empty result (for
+        // example with detached/merged season metadata). The user-items endpoint resolves the
+        // same concrete children by authoritative ParentId and keeps the TV UI from presenting a
+        // false "No episodes" state. It is also a safe compatibility path for older servers.
+        val parentEndpoint = session.serverUrl + "/Users/" + user +
+            "/Items?ParentId=" + encode(normalizedSeasonId) +
+            "&IncludeItemTypes=Episode&Recursive=true&SortBy=ParentIndexNumber,IndexNumber,SortName" +
+            "&SortOrder=Ascending&EnableUserData=true&Fields=" + fields
+        return try {
+            normalizeSeasonEpisodes(
+                parseItems(request(parentEndpoint, token = session.token)),
+                normalizedSeriesId,
+                normalizedSeasonId
+            )
+        } catch (fallbackError: Throwable) {
+            showsResult.exceptionOrNull()?.let(fallbackError::addSuppressed)
+            throw fallbackError
+        }
     }
+
+    private fun normalizeSeasonEpisodes(
+        candidates: List<MediaItem>,
+        seriesId: String,
+        seasonId: String
+    ): List<MediaItem> = candidates.asSequence()
+        .filter { it.type.equals("Episode", ignoreCase = true) && it.id.isNotBlank() }
+        .map { episode ->
+            episode.copy(
+                seriesId = episode.seriesId?.takeIf(String::isNotBlank) ?: seriesId,
+                seasonId = episode.seasonId?.takeIf(String::isNotBlank) ?: seasonId
+            )
+        }
+        .distinctBy(MediaItem::id)
+        .toList()
 
     /** Loads the complete series-scoped episode set used by explicit Play All/Shuffle queues. */
     fun loadSeriesEpisodes(session: NativeSession, seriesId: String): List<MediaItem> {
@@ -322,8 +407,205 @@ class JellyfinNativeApi(private val context: Context) {
         return List(array.length()) { array.optJSONObject(it).optString("Name") }.filter { it.isNotBlank() }
     }
 
-    fun search(session: NativeSession, query: String): List<MediaItem> =
-        parseItems(request(session.serverUrl + "/Users/" + encode(session.userId) + "/Items?SearchTerm=" + encode(query) + "&Recursive=true&Limit=40&Fields=ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber&IncludeItemTypes=Movie,Series,MusicArtist,MusicAlbum,Audio,Book,Person", token = session.token))
+    fun search(
+        session: NativeSession,
+        query: String,
+        itemTypes: List<String> = DEFAULT_SEARCH_ITEM_TYPES,
+        includeGenres: Boolean = true,
+        includeStudios: Boolean = true
+    ): List<MediaItem> = searchWithinBudget(
+        session = session,
+        query = query,
+        itemTypes = itemTypes,
+        includeGenres = includeGenres,
+        includeStudios = includeStudios,
+        resultBudgetMs = SEARCH_RESULT_BUDGET_MS
+    )
+
+    fun searchIncrementally(
+        session: NativeSession,
+        query: String,
+        itemTypes: List<String> = DEFAULT_SEARCH_ITEM_TYPES,
+        includeGenres: Boolean = true,
+        includeStudios: Boolean = true,
+        onPartialResults: (List<MediaItem>) -> Unit
+    ): List<MediaItem> = searchWithinBudget(
+        session = session,
+        query = query,
+        itemTypes = itemTypes,
+        includeGenres = includeGenres,
+        includeStudios = includeStudios,
+        resultBudgetMs = SEARCH_RESULT_BUDGET_MS,
+        onPartialResults = onPartialResults
+    )
+
+    internal fun searchWithinBudget(
+        session: NativeSession,
+        query: String,
+        itemTypes: List<String> = DEFAULT_SEARCH_ITEM_TYPES,
+        includeGenres: Boolean = true,
+        includeStudios: Boolean = true,
+        resultBudgetMs: Long,
+        onPartialResults: ((List<MediaItem>) -> Unit)? = null
+    ): List<MediaItem> {
+        val normalizedQuery = query.trim()
+        require(normalizedQuery.isNotEmpty()) { "Search query is required" }
+        require(resultBudgetMs > 0L) { "Search result budget must be positive" }
+
+        val categoryTypes = buildSet {
+            if (includeGenres) {
+                add("Genre")
+                add("MusicGenre")
+            }
+            if (includeStudios) add("Studio")
+        }
+        val searches = buildList<() -> List<MediaItem>> {
+            if (itemTypes.isNotEmpty()) {
+                add { searchMediaItems(session, normalizedQuery, itemTypes) }
+            }
+            if (categoryTypes.isNotEmpty()) {
+                add { searchCategoryHints(session, normalizedQuery, categoryTypes) }
+            }
+        }
+        if (searches.isEmpty()) return emptyList()
+
+        val fanOutScope = requestScope.get() ?: NativeRequestScope()
+        val workers = Executors.newFixedThreadPool(
+            searches.size.coerceAtMost(SEARCH_MAX_PARALLEL_BRANCHES)
+        ) { runnable ->
+            Thread(runnable, "ptv-search-api").apply { isDaemon = true }
+        }
+        val completion = ExecutorCompletionService<Pair<Int, List<MediaItem>>>(workers)
+        val resultsByBranch = MutableList<List<MediaItem>?>(searches.size) { null }
+        val failures = mutableListOf<Throwable>()
+        val futures = searches.mapIndexed { index, search ->
+            completion.submit {
+                index to withRequestScope(fanOutScope, search)
+            }
+        }
+        var completedBranches = 0
+        var successfulBranches = 0
+        try {
+            val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(resultBudgetMs)
+            while (completedBranches < searches.size) {
+                val remainingNanos = deadlineNanos - System.nanoTime()
+                if (remainingNanos <= 0L) break
+                val future = completion.poll(remainingNanos, TimeUnit.NANOSECONDS) ?: break
+                completedBranches += 1
+                runCatching { future.get() }.fold(
+                    onSuccess = { (index, items) ->
+                        successfulBranches += 1
+                        resultsByBranch[index] = items
+                        val partial = aggregateSearchResults(resultsByBranch)
+                        if (partial.isNotEmpty()) {
+                            runCatching { onPartialResults?.invoke(partial) }
+                        }
+                    },
+                    onFailure = { failures.add(it.cause ?: it) }
+                )
+            }
+        } finally {
+            if (completedBranches < searches.size) {
+                // One search owns one scope, so this only cancels the unfinished branches for the
+                // current query. Completed matches remain available to the caller.
+                fanOutScope.cancel()
+                futures.filterNot { it.isDone }.forEach { it.cancel(true) }
+            }
+            workers.shutdownNow()
+        }
+        if (successfulBranches == 0) {
+            if (completedBranches < searches.size) {
+                throw SocketTimeoutException("Search timed out before a result group completed")
+            }
+            if (failures.size == searches.size) {
+                throw failures.first()
+            }
+        }
+
+        return aggregateSearchResults(resultsByBranch)
+    }
+
+    private fun aggregateSearchResults(
+        resultsByBranch: List<List<MediaItem>?>
+    ): List<MediaItem> = buildList {
+        resultsByBranch.forEach { branch ->
+            if (branch != null) {
+                addAll(branch)
+            }
+        }
+    }.distinctBy { "${it.type.lowercase()}:${it.id}" }
+
+    private fun searchMediaItems(
+        session: NativeSession,
+        query: String,
+        itemTypes: List<String>
+    ): List<MediaItem> {
+        val fields = "ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber"
+        val endpoint = session.serverUrl + "/Users/" + encode(session.userId) +
+            "/Items?SearchTerm=" + encode(query) +
+            "&Recursive=true&Limit=40&EnableTotalRecordCount=false&Fields=" + fields +
+            "&IncludeItemTypes=" + encode(itemTypes.joinToString(","))
+        return parseItems(request(endpoint, token = session.token))
+    }
+
+    private fun searchCategoryHints(
+        session: NativeSession,
+        query: String,
+        requestedTypes: Set<String>
+    ): List<MediaItem> {
+        val cacheKey = CategorySearchCacheKey(
+            serverId = session.serverId,
+            userId = session.userId,
+            query = query.trim().lowercase().replace(Regex("\\s+"), " ")
+        )
+        val nowNanos = System.nanoTime()
+        val cached = synchronized(categorySearchCacheLock) {
+            categorySearchCache[cacheKey]?.takeIf { entry ->
+                nowNanos - entry.storedAtNanos < SEARCH_CATEGORY_CACHE_TTL_NANOS
+            }?.items.also { items ->
+                if (items == null) categorySearchCache.remove(cacheKey)
+            }
+        }
+        val allCategories = cached ?: run {
+            val endpoint = session.serverUrl + "/Search/Hints" +
+                "?SearchTerm=" + encode(query) +
+                "&UserId=" + encode(session.userId) +
+                "&Limit=" + SEARCH_CATEGORY_HINT_LIMIT +
+                "&IncludeItemTypes=" + encode(ALL_SEARCH_CATEGORY_TYPES.joinToString(",")) +
+                "&IncludePeople=false&IncludeMedia=false&IncludeGenres=true" +
+                "&IncludeStudios=true&IncludeArtists=false"
+            val loaded = parseSearchHints(request(endpoint, token = session.token))
+                .filter { item -> item.type in ALL_SEARCH_CATEGORY_TYPES }
+            synchronized(categorySearchCacheLock) {
+                categorySearchCache[cacheKey] = CategorySearchCacheEntry(
+                    storedAtNanos = System.nanoTime(),
+                    items = loaded
+                )
+                while (categorySearchCache.size > SEARCH_CATEGORY_CACHE_MAX_ENTRIES) {
+                    categorySearchCache.remove(categorySearchCache.entries.first().key)
+                }
+            }
+            loaded
+        }
+
+        return allCategories
+            .asSequence()
+            .filter { item -> item.type in requestedTypes }
+            .filter { it.id.isNotBlank() && it.title.isNotBlank() }
+            .sortedBy { categorySearchRank(it.title, query) }
+            .toList()
+    }
+
+    private fun categorySearchRank(title: String, query: String): Int {
+        val normalizedTitle = title.trim().lowercase()
+        val normalizedQuery = query.trim().lowercase()
+        return when {
+            normalizedTitle == normalizedQuery -> 0
+            normalizedTitle.startsWith(normalizedQuery) -> 1
+            normalizedTitle.contains(normalizedQuery) -> 2
+            else -> 3
+        }
+    }
 
     fun imageUrl(session: NativeSession, item: MediaItem, presentation: MediaCardPresentation): String =
         primaryImageUrl(session, item.id, item.imageTag, ImageSizing.maxWidth(presentation))
@@ -365,8 +647,15 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadSimilar(session: NativeSession, itemId: String, limit: Int = 12): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,OfficialRating,Genres"
+        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,OfficialRating,CommunityRating,Genres,Studios,People,Artists,Album,AlbumArtist,AlbumId"
         val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/Similar?UserId=" + user + "&Limit=" + limit + "&Fields=" + fields
+        return parseItems(request(endpoint, token = session.token))
+    }
+
+    fun loadInstantMix(session: NativeSession, itemId: String, limit: Int = 48): List<MediaItem> {
+        val user = encode(session.userId)
+        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,DateCreated,UserData,RunTimeTicks,CommunityRating,Genres,Artists,Album,AlbumArtist,AlbumId,Container"
+        val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/InstantMix?UserId=" + user + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
@@ -557,7 +846,8 @@ class JellyfinNativeApi(private val context: Context) {
             Triple("Recently played", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=DatePlayed&SortOrder=Descending&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE),
             Triple("Recently added albums", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE),
             Triple("Recently added songs", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=12&Fields=" + fields, MediaCardPresentation.LANDSCAPE),
-            Triple("Favorite albums", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&Filters=IsFavorite&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE)
+            Triple("Favorite albums", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&Filters=IsFavorite&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE),
+            Triple("Playlists", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Playlist&Recursive=true&SortBy=SortName&SortOrder=Ascending&Limit=24&Fields=" + fields, MediaCardPresentation.SQUARE)
         )
         requests.forEach { (title, endpoint, presentation) ->
             runCatching { parseItems(request(endpoint, token = session.token)) }.onSuccess { items ->
@@ -609,9 +899,9 @@ class JellyfinNativeApi(private val context: Context) {
         return parseItems(request(endpoint, token = session.token))
     }
 
-    fun loadRecentMusicSignals(session: NativeSession, limit: Int = 48): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "DatePlayed", "SortOrder" to "Descending", "Limit" to limit.toString()))
-    fun loadFrequentMusicSignals(session: NativeSession, limit: Int = 48): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "PlayCount", "SortOrder" to "Descending", "Limit" to limit.toString()))
-    fun loadFavoriteArtists(session: NativeSession, limit: Int = 24): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "MusicArtist", "Recursive" to "true", "Filters" to "IsFavorite", "Limit" to limit.toString()))
+    fun loadRecentMusicSignals(session: NativeSession, limit: Int = 48): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "DatePlayed", "SortOrder" to "Descending", "Limit" to limit.toString(), "Fields" to DiscoveryQueryPlanner.RECOMMENDATION_FIELDS))
+    fun loadFrequentMusicSignals(session: NativeSession, limit: Int = 48): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "Audio", "Recursive" to "true", "SortBy" to "PlayCount", "SortOrder" to "Descending", "Limit" to limit.toString(), "Fields" to DiscoveryQueryPlanner.RECOMMENDATION_FIELDS))
+    fun loadFavoriteArtists(session: NativeSession, limit: Int = 24): List<MediaItem> = fetchItems(session, mapOf("IncludeItemTypes" to "MusicArtist", "Recursive" to "true", "Filters" to "IsFavorite", "Limit" to limit.toString(), "Fields" to DiscoveryQueryPlanner.RECOMMENDATION_FIELDS))
 
     fun loadPlaylists(session: NativeSession): List<MediaItem> {
         val user = encode(session.userId)
@@ -680,14 +970,31 @@ class JellyfinNativeApi(private val context: Context) {
             response.optString("ServerId"),
             user?.optString("Id").orEmpty(),
             user?.optString("Name").takeUnless { it.isNullOrBlank() } ?: fallbackName,
-            normalizedServer
+            normalizedServer,
+            isAdministrator(user)
         ).also { check(it.isComplete()) { "Authentication response missing required fields" } }
+    }
+
+    private fun isAdministrator(user: JSONObject?): Boolean {
+        if (user == null) return false
+        val policy = user.optJSONObject("Policy") ?: return user.optBoolean("IsAdministrator", false)
+        return policy.optBoolean("IsAdministrator", false)
     }
 
     private fun parseItems(body: String): List<MediaItem> {
         val started = SystemClock.elapsedRealtime()
         return try {
             val array = JSONObject(body).optJSONArray("Items") ?: JSONArray()
+            List(array.length()) { parseItem(array.optJSONObject(it)) }
+        } finally {
+            parseDurationMs.set(SystemClock.elapsedRealtime() - started)
+        }
+    }
+
+    private fun parseSearchHints(body: String): List<MediaItem> {
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            val array = JSONObject(body).optJSONArray("SearchHints") ?: JSONArray()
             List(array.length()) { parseItem(array.optJSONObject(it)) }
         } finally {
             parseDurationMs.set(SystemClock.elapsedRealtime() - started)
@@ -701,6 +1008,12 @@ class JellyfinNativeApi(private val context: Context) {
         val episode = if (item.has("IndexNumber")) item.optInt("IndexNumber") else -1
         val imageTags = item.optJSONObject("ImageTags")
         val genres = item.optJSONArray("Genres")?.let { arr -> List(arr.length()) { arr.optString(it) } } ?: emptyList()
+        val studios = item.optJSONArray("Studios")?.let { array ->
+            List(array.length()) { index ->
+                val value = array.opt(index)
+                if (value is JSONObject) value.optString("Name") else value?.toString().orEmpty()
+            }.filter(String::isNotBlank)
+        } ?: emptyList()
         val label = when {
             season >= 0 && episode >= 0 -> "S$season E$episode"
             episode >= 0 -> "Episode $episode"
@@ -727,10 +1040,12 @@ class JellyfinNativeApi(private val context: Context) {
             title = item.optString("Name").ifBlank { "Untitled" },
             type = item.optString("Type"),
             year = item.optInt("ProductionYear", 0).takeIf { it > 0 }?.toString(),
-            imageTag = imageTags?.nonBlankString("Primary"),
+            imageTag = imageTags?.nonBlankString("Primary") ?: item.nonBlankString("PrimaryImageTag"),
             backdropTag = imageTags?.nonBlankString("Backdrop"),
             logoTag = imageTags?.nonBlankString("Logo"),
-            seriesName = item.optString("SeriesName").ifBlank { null },
+            seriesName = item.optString("SeriesName").ifBlank {
+                item.optString("Series").ifBlank { null }
+            },
             episodeLabel = label,
             playbackPositionTicks = userData?.optLong("PlaybackPositionTicks", 0L) ?: 0L,
             runtimeTicks = runtimeTicks,
@@ -738,6 +1053,7 @@ class JellyfinNativeApi(private val context: Context) {
             communityRating = item.optDouble("CommunityRating", 0.0).toFloat().takeIf { it > 0 },
             officialRating = item.optString("OfficialRating"),
             genres = genres,
+            studios = studios,
             productionYear = item.optInt("ProductionYear", 0).takeIf { it > 0 },
             container = item.optString("Container").ifBlank { item.optString("Path").let { if (it.contains(".")) it.substringAfterLast('.') else "" } }.takeUnless { it.isNullOrBlank() },
             seriesId = item.optString("SeriesId").ifBlank { null },
@@ -758,6 +1074,9 @@ class JellyfinNativeApi(private val context: Context) {
             childCount = item.optInt("ChildCount", -1).takeIf { it >= 0 },
             episodeCount = item.optInt("EpisodeCount", -1).takeIf { it >= 0 },
             recursiveItemCount = item.optInt("RecursiveItemCount", -1).takeIf { it >= 0 },
+            playCount = userData?.optInt("PlayCount", 0) ?: 0,
+            lastPlayedDate = userData?.optString("LastPlayedDate")?.ifBlank { null },
+            dateCreated = item.optString("DateCreated").ifBlank { null },
             backdropImageTags = item.nonBlankStrings("BackdropImageTags"),
             thumbImageTag = imageTags?.nonBlankString("Thumb"),
             parentBackdropItemId = item.nonBlankString("ParentBackdropItemId"),
@@ -806,11 +1125,34 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     private companion object {
+        const val SEARCH_MAX_PARALLEL_BRANCHES = 1
+        const val SEARCH_RESULT_BUDGET_MS = 9_000L
+        const val SEARCH_CATEGORY_HINT_LIMIT = 40
+        const val SEARCH_CATEGORY_CACHE_MAX_ENTRIES = 64
+        val SEARCH_CATEGORY_CACHE_TTL_NANOS = TimeUnit.MINUTES.toNanos(2)
+
+        val ALL_SEARCH_CATEGORY_TYPES = setOf("Genre", "MusicGenre", "Studio")
+
+        val DEFAULT_SEARCH_ITEM_TYPES = listOf(
+            "Movie",
+            "Series",
+            "MusicArtist",
+            "MusicAlbum",
+            "Audio",
+            "Person"
+        )
+
         const val DETAILS_ARTWORK_FIELDS =
             "BackdropImageTags,ParentBackdropItemId,ParentBackdropImageTags," +
                 "ParentLogoItemId,ParentLogoImageTag,ParentPrimaryImageItemId," +
                 "ParentPrimaryImageTag,ParentThumbItemId,ParentThumbImageTag," +
                 "SeriesPrimaryImageTag"
+
+        const val ITEM_RESOLUTION_FIELDS =
+            "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear," +
+                "UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview," +
+                "MediaSources,Chapters,CriticRating,People,SeriesName,SeriesId,SeasonId," +
+                "IndexNumber,ParentIndexNumber,Artists,Album,AlbumArtist,AlbumId,Container"
 
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null

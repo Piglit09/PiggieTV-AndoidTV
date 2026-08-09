@@ -8,7 +8,8 @@ object DiscoveryQueryPlanner {
             "OfficialRating,CommunityRating,Genres,RunTimeTicks," +
             "SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,Overview"
 
-    const val RECOMMENDATION_FIELDS = CARD_FIELDS
+    const val RECOMMENDATION_FIELDS =
+        "$CARD_FIELDS,Studios,People,Artists,Album,AlbumArtist,AlbumId,DateCreated,Container"
 
     /**
      * /Users/{userId}/Items/Resume is already Jellyfin's resumable-items contract. Keep this

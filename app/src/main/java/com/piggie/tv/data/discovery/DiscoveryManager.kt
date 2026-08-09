@@ -9,6 +9,7 @@ import com.piggie.tv.data.api.DebugDiscoveryFaultInjector
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.recommendations.PremiumRecommendationRanker
 import com.piggie.tv.memory.MemoryPressurePolicy
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -464,13 +465,20 @@ object DiscoveryManager {
                         capturedCall { api.fetchNextUp(nativeSession, definition.limit) }
                     }
                     DiscoveryShelfType.RECOMMENDED, DiscoveryShelfType.YOU_MAY_ALSO_LIKE -> {
+                        val candidateLimit = (definition.limit * 3).coerceIn(definition.limit, 48)
                         endpoint = "/Users/[user]/Suggestions"
                         params = linkedMapOf(
                             "IncludeItemTypes" to definition.itemTypes.joinToString(","),
-                            "Limit" to definition.limit.toString(),
+                            "Limit" to candidateLimit.toString(),
                             "Fields" to DiscoveryQueryPlanner.RECOMMENDATION_FIELDS
                         )
-                        capturedCall { api.fetchRecommendations(nativeSession, definition.itemTypes.joinToString(","), definition.limit) }
+                        capturedCall {
+                            api.fetchRecommendations(
+                                nativeSession,
+                                definition.itemTypes.joinToString(","),
+                                candidateLimit
+                            )
+                        }
                     }
                     else -> {
                         var result = capturedCall { api.fetchItems(nativeSession, params) }
@@ -514,7 +522,14 @@ object DiscoveryManager {
                 val deduplicated = DiscoveryShelfResultPolicy.deduplicate(eligible)
                 val dedupeMs = SystemClock.elapsedRealtime() - dedupeStarted
                 val scoringStarted = SystemClock.elapsedRealtime()
-                val finalItems = deduplicated.take(definition.limit)
+                val finalItems = if (
+                    definition.type == DiscoveryShelfType.RECOMMENDED ||
+                    definition.type == DiscoveryShelfType.YOU_MAY_ALSO_LIKE
+                ) {
+                    PremiumRecommendationRanker.rankSuggestions(deduplicated, definition.limit)
+                } else {
+                    deduplicated.take(definition.limit)
+                }
                 val scoringMs = SystemClock.elapsedRealtime() - scoringStarted
                 val status = if (finalItems.isNotEmpty()) ShelfStatus.READY else ShelfStatus.EMPTY
 
