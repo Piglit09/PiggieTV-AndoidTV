@@ -142,6 +142,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var episodeShuffleAllAction: View? = null
     private var currentSeasonEpisodes: List<MediaItem> = emptyList()
     private var currentSeriesEpisodes: List<MediaItem> = emptyList()
+    private var seasonEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
+    private var seriesEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
     private var relatedList: RecyclerView? = null
     private var primaryAction: View? = null
     private var tracksReady = false
@@ -290,6 +292,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         episodeShuffleAllAction = null
         currentSeasonEpisodes = emptyList()
         currentSeriesEpisodes = emptyList()
+        seasonEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
+        seriesEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
         relatedList = null
         primaryAction = null
         currentItem = null
@@ -982,12 +986,13 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         primaryAction = play
         addAction(play)
 
-        if (item.type.equals("Series", ignoreCase = true) && currentSeriesEpisodes.isNotEmpty()) {
+        if (item.type.equals("Series", ignoreCase = true)) {
+            val queueDecision = EpisodeQueueActionPolicy.decide(seriesEpisodeQueueState)
             addAction(
-                actionButton(
-                    "Play All",
-                    true,
-                    "Play all episodes in this series"
+                episodeQueueActionButton(
+                    label = "Play All",
+                    description = "Play all episodes in this series",
+                    enabled = queueDecision.actionsEnabled
                 ) { opener ->
                     rememberExternalFocus(opener)
                     VideoPlayerActivity.startSeries(
@@ -998,10 +1003,10 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 }
             )
             addAction(
-                actionButton(
-                    "Shuffle All",
-                    true,
-                    "Shuffle all episodes in this series"
+                episodeQueueActionButton(
+                    label = "Shuffle All",
+                    description = "Shuffle all episodes in this series",
+                    enabled = queueDecision.actionsEnabled
                 ) { opener ->
                     rememberExternalFocus(opener)
                     VideoPlayerActivity.startSeries(
@@ -1011,6 +1016,13 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                     )
                 }
             )
+            queueDecision.statusLabel?.let { label ->
+                addAction(
+                    episodeQueueStatusButton(label, queueDecision.retryAvailable) {
+                        loadSeriesEpisodes(currentItem ?: item, requestGeneration)
+                    }
+                )
+            }
         }
 
         EpisodeSeriesNavigationPolicy.seriesId(item)?.let { seriesId ->
@@ -1063,7 +1075,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 val target = restoreDescription?.let { description ->
                     row.children().firstOrNull { it.contentDescription == description }
                 } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
-                target?.requestFocus()
+                if (target?.requestFocus() != true) play.requestFocus()
             }
         } else if (currentItem != null && root.findFocus() == null) {
             play.requestFocus()
@@ -1076,29 +1088,46 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         restoreIndex: Int?
     ) {
         var defaultFocus: View? = null
-        if (currentSeasonEpisodes.isNotEmpty()) {
-            val playAll = premiumActionButton("Play All", android.R.drawable.ic_media_play) {
+        val queueDecision = EpisodeQueueActionPolicy.decide(seasonEpisodeQueueState)
+        val playAll = premiumActionButton("Play All", android.R.drawable.ic_media_play) {
+            if (queueDecision.actionsEnabled) {
                 rememberExternalFocus(activity?.currentFocus)
                 VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = false)
-            }.apply {
-                contentDescription = "Play all episodes in this season"
-                id = View.generateViewId()
             }
-            val shuffleAll = actionButton(
-                "Shuffle All",
-                true,
-                "Shuffle all episodes in this season"
-            ) { opener ->
+        }.apply {
+            contentDescription = if (queueDecision.actionsEnabled) {
+                "Play all episodes in this season"
+            } else {
+                "Play all episodes in this season, unavailable"
+            }
+            id = View.generateViewId()
+            setEpisodeQueueActionEnabled(queueDecision.actionsEnabled)
+        }
+        val shuffleAll = episodeQueueActionButton(
+            "Shuffle All",
+            "Shuffle all episodes in this season",
+            queueDecision.actionsEnabled
+        ) { opener ->
+            if (queueDecision.actionsEnabled) {
                 rememberExternalFocus(opener)
                 VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = true)
-            }.apply { id = View.generateViewId() }
-            playAll.nextFocusRightId = shuffleAll.id
-            shuffleAll.nextFocusLeftId = playAll.id
+            }
+        }.apply { id = View.generateViewId() }
+        playAll.nextFocusRightId = shuffleAll.id
+        shuffleAll.nextFocusLeftId = playAll.id
+        if (queueDecision.actionsEnabled) {
             episodePlayAllAction = playAll
             episodeShuffleAllAction = shuffleAll
-            addAction(playAll)
-            addAction(shuffleAll)
             defaultFocus = playAll
+        }
+        addAction(playAll)
+        addAction(shuffleAll)
+        queueDecision.statusLabel?.let { label ->
+            val status = episodeQueueStatusButton(label, queueDecision.retryAvailable) {
+                loadSeasonEpisodes(currentItem ?: season, requestGeneration)
+            }
+            addAction(status)
+            if (defaultFocus == null && status.isFocusable) defaultFocus = status
         }
 
         EpisodeSeriesNavigationPolicy.seriesId(season)?.let { seriesId ->
@@ -1146,7 +1175,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 val target = restoreDescription?.let { description ->
                     row.children().firstOrNull { it.contentDescription == description }
                 } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
-                (target ?: defaultFocus)?.requestFocus()
+                if (target?.requestFocus() != true) defaultFocus?.requestFocus()
             }
         } else if (currentItem != null && root.findFocus() == null) {
             defaultFocus?.requestFocus()
@@ -1197,6 +1226,37 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         setPadding(horizontalPadding, 0, horizontalPadding, 0)
         setOnClickListener { action(this) }
         setOnFocusChangeListener { v, f -> PTVShapes.applyFocusEffect(v, f) }
+    }
+
+    private fun episodeQueueActionButton(
+        label: String,
+        description: String,
+        enabled: Boolean,
+        action: (View) -> Unit
+    ): Button = actionButton(label, true, description, action).apply {
+        setEpisodeQueueActionEnabled(enabled)
+        if (!enabled) contentDescription = "$description, unavailable"
+    }
+
+    private fun Button.setEpisodeQueueActionEnabled(enabled: Boolean) {
+        isEnabled = enabled
+        isFocusable = enabled
+        alpha = if (enabled) 1f else DISABLED_ACTION_ALPHA
+    }
+
+    private fun episodeQueueStatusButton(
+        label: String,
+        retryAvailable: Boolean,
+        retry: () -> Unit
+    ): Button = actionButton(
+        label = label,
+        secondary = true,
+        description = if (retryAvailable) "Retry loading episodes" else label,
+        action = { if (retryAvailable) retry() }
+    ).apply {
+        isEnabled = retryAvailable
+        isFocusable = retryAvailable
+        alpha = if (retryAvailable) 1f else DISABLED_ACTION_ALPHA
     }
 
     private fun premiumActionButton(label: String, iconRes: Int, action: () -> Unit): Button =
@@ -1410,6 +1470,16 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         seasonsSettled = loading.kind != DetailsSecondaryLoadKind.SERIES_SEASONS
         episodesSettled = loading.kind != DetailsSecondaryLoadKind.SEASON_EPISODES
         relatedSettled = loading.kind == DetailsSecondaryLoadKind.SEASON_EPISODES
+        seriesEpisodeQueueState = if (loading.kind == DetailsSecondaryLoadKind.SERIES_SEASONS) {
+            EpisodeQueueLoadState.LOADING
+        } else {
+            EpisodeQueueLoadState.NOT_REQUESTED
+        }
+        seasonEpisodeQueueState = if (loading.kind == DetailsSecondaryLoadKind.SEASON_EPISODES) {
+            EpisodeQueueLoadState.LOADING
+        } else {
+            EpisodeQueueLoadState.NOT_REQUESTED
+        }
     }
 
     private fun renderCast(item: MediaItem) {
@@ -1471,12 +1541,19 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private fun loadSeriesEpisodes(series: MediaItem, generation: Int) {
         val seriesId = SeriesPlaybackQueuePolicy.validSeriesId(series) ?: return
         currentSeriesEpisodes = emptyList()
+        seriesEpisodeQueueState = EpisodeQueueLoadState.LOADING
+        rerenderActionsPreservingFocus(currentItem ?: series)
         launchApiWork(WORK_SERIES_EPISODES, "ptv-series-episodes-$seriesId") {
             runCatching { api.loadSeriesEpisodes(session, seriesId) }
                 .onSuccess { episodes ->
                     activity?.runOnUiThread {
                         if (!isCurrentRequest(generation, seriesId)) return@runOnUiThread
                         currentSeriesEpisodes = SeriesPlaybackQueuePolicy.episodes(series, episodes)
+                        seriesEpisodeQueueState = if (currentSeriesEpisodes.isEmpty()) {
+                            EpisodeQueueLoadState.EMPTY
+                        } else {
+                            EpisodeQueueLoadState.READY
+                        }
                         rerenderActionsPreservingFocus(currentItem ?: series)
                     }
                 }
@@ -1484,6 +1561,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                     activity?.runOnUiThread {
                         if (!isCurrentRequest(generation, seriesId)) return@runOnUiThread
                         currentSeriesEpisodes = emptyList()
+                        seriesEpisodeQueueState = EpisodeQueueLoadState.FAILED
+                        rerenderActionsPreservingFocus(currentItem ?: series)
                     }
                 }
         }
@@ -1520,12 +1599,16 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         val seriesId = EpisodeSeriesNavigationPolicy.seriesId(season)
         currentSeasonId = season.id
         currentSeasonEpisodes = emptyList()
+        seasonEpisodeQueueState = EpisodeQueueLoadState.LOADING
         episodesSettled = false
         val episodeRequest = ++episodeRequestGeneration
         showEpisodesLoading(season)
+        rerenderActionsPreservingFocus(currentItem ?: season)
         if (seriesId == null) {
             episodesSettled = true
+            seasonEpisodeQueueState = EpisodeQueueLoadState.FAILED
             showSeasonEpisodesFailure(season, generation, "Series information is unavailable.")
+            rerenderActionsPreservingFocus(currentItem ?: season)
             return
         }
         launchApiWork(WORK_EPISODES, "ptv-season-details-episodes-${season.id}") {
@@ -1539,6 +1622,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                         ) return@runOnUiThread
                         episodesSettled = true
                         currentSeasonEpisodes = episodes
+                        seasonEpisodeQueueState = if (episodes.isEmpty()) {
+                            EpisodeQueueLoadState.EMPTY
+                        } else {
+                            EpisodeQueueLoadState.READY
+                        }
                         showEpisodes(episodes, season.id)
                         rerenderActionsPreservingFocus(currentItem ?: season)
                     }
@@ -1552,6 +1640,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                         ) return@runOnUiThread
                         episodesSettled = true
                         currentSeasonEpisodes = emptyList()
+                        seasonEpisodeQueueState = EpisodeQueueLoadState.FAILED
                         showSeasonEpisodesFailure(season, generation)
                         rerenderActionsPreservingFocus(currentItem ?: season)
                     }
@@ -1663,6 +1752,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         pendingActionSeasonFocus = false
         currentSeasonEpisodes = emptyList()
         currentSeriesEpisodes = emptyList()
+        seasonEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
+        seriesEpisodeQueueState = EpisodeQueueLoadState.NOT_REQUESTED
         episodePlayAllAction = null
         episodeShuffleAllAction = null
     }
@@ -2065,6 +2156,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         private const val DETAILS_BACKDROP_HEIGHT = 720
         private const val DETAILS_LOGO_WIDTH = 400
         private const val DETAILS_LOGO_HEIGHT = 240
+        private const val DISABLED_ACTION_ALPHA = 0.45f
         private const val AUDIO_DESCRIPTION = "Choose audio track"
         private const val SUBTITLE_DESCRIPTION = "Choose subtitle track"
         private const val SPEED_DESCRIPTION = "Choose connection speed"

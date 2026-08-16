@@ -2,7 +2,7 @@
 
 Native Android TV client for Jellyfin. High performance, zero WebView, built for the living room.
 
-## Current Status (v0.8.7 Beta)
+## Current Status (v0.8.8 Beta)
 PiggieTV has transitioned to its first controlled beta. Movies, Shows, and Music are unified under a high-performance native Shell.
 
 ## Key Features

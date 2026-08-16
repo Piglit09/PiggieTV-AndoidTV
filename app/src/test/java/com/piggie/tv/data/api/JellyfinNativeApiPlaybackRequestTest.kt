@@ -239,15 +239,8 @@ class JellyfinNativeApiPlaybackRequestTest {
             .orEmpty()
             .split(',')
             .toSet()
-        assertTrue(fields.containsAll(setOf(
-            "SeriesId",
-            "SeasonId",
-            "SeriesName",
-            "IndexNumber",
-            "ParentIndexNumber",
-            "ParentLogoItemId",
-            "ParentLogoImageTag"
-        )))
+        assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
+        assertTrue(fields.containsAll(setOf("PrimaryImageAspectRatio", "MediaSources", "Chapters")))
     }
 
     @Test
@@ -310,18 +303,8 @@ class JellyfinNativeApiPlaybackRequestTest {
                 .orEmpty()
                 .split(',')
                 .toSet()
-            assertTrue(fields.containsAll(setOf(
-                "BackdropImageTags",
-                "ParentBackdropItemId",
-                "ParentBackdropImageTags",
-                "ParentLogoItemId",
-                "ParentLogoImageTag",
-                "ParentPrimaryImageItemId",
-                "ParentPrimaryImageTag",
-                "ParentThumbItemId",
-                "ParentThumbImageTag",
-                "SeriesPrimaryImageTag"
-            )))
+            assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
+            assertTrue("PrimaryImageAspectRatio" in fields)
         }
     }
 
@@ -443,16 +426,12 @@ class JellyfinNativeApiPlaybackRequestTest {
             .orEmpty()
             .split(',')
             .toSet()
+        assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
         assertTrue(fields.containsAll(setOf(
-            "SeriesName",
-            "SeriesId",
-            "IndexNumber",
+            "PrimaryImageAspectRatio",
             "Overview",
             "ChildCount",
-            "EpisodeCount",
-            "RecursiveItemCount",
-            "ParentLogoItemId",
-            "ParentLogoImageTag"
+            "RecursiveItemCount"
         )))
     }
 }

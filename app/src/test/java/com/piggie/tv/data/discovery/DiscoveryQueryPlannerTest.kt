@@ -1,5 +1,6 @@
 package com.piggie.tv.data.discovery
 
+import com.piggie.tv.data.api.JellyfinItemFields
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -78,13 +79,8 @@ class DiscoveryQueryPlannerTest {
         assertEquals("true", params["EnableUserData"])
         assertEquals("false", params["EnableTotalRecordCount"])
         assertNotNull(params["Fields"])
-        assertTrue(params.getValue("Fields").contains("BackdropImageTags"))
         assertTrue(params.getValue("Fields").contains("Overview"))
-        assertTrue(params.getValue("Fields").contains("SeriesId"))
-        assertTrue(params.getValue("Fields").contains("SeasonId"))
-        assertTrue(params.getValue("Fields").contains("SeriesName"))
-        assertTrue(params.getValue("Fields").contains("IndexNumber"))
-        assertTrue(params.getValue("Fields").contains("ParentIndexNumber"))
+        assertTrue(JellyfinItemFields.unsupported(params.getValue("Fields")).isEmpty())
         assertFalse(params.containsKey("Recursive"))
         assertFalse(params.containsKey("Filters"))
         assertFalse(params.containsKey("IsResumable"))

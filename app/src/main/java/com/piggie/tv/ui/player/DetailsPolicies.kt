@@ -445,6 +445,47 @@ object SeriesPlaybackQueuePolicy {
     }
 }
 
+enum class EpisodeQueueLoadState {
+    NOT_REQUESTED,
+    LOADING,
+    READY,
+    EMPTY,
+    FAILED
+}
+
+data class EpisodeQueueActionDecision(
+    val actionsEnabled: Boolean,
+    val statusLabel: String?,
+    val retryAvailable: Boolean
+)
+
+/** Keeps Play All and Shuffle All visible while making incomplete queue state explicit. */
+object EpisodeQueueActionPolicy {
+    fun decide(state: EpisodeQueueLoadState): EpisodeQueueActionDecision = when (state) {
+        EpisodeQueueLoadState.READY -> EpisodeQueueActionDecision(
+            actionsEnabled = true,
+            statusLabel = null,
+            retryAvailable = false
+        )
+        EpisodeQueueLoadState.FAILED -> EpisodeQueueActionDecision(
+            actionsEnabled = false,
+            statusLabel = "Retry Episodes",
+            retryAvailable = true
+        )
+        EpisodeQueueLoadState.EMPTY -> EpisodeQueueActionDecision(
+            actionsEnabled = false,
+            statusLabel = "No Episodes Available",
+            retryAvailable = false
+        )
+        EpisodeQueueLoadState.NOT_REQUESTED,
+        EpisodeQueueLoadState.LOADING -> EpisodeQueueActionDecision(
+            actionsEnabled = false,
+            statusLabel = "Loading Episodes\u2026",
+            retryAvailable = false
+        )
+    }
+}
+
 /**
  * A lightweight discovery item can contain episode ancestry that a later details response omits.
  * Keep that route identity while still allowing every value returned by full details to win.

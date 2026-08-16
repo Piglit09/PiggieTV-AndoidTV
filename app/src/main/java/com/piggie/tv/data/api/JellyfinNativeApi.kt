@@ -169,7 +169,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadHomeIncrementally(session: NativeSession, onShelf: (MediaShelf) -> Unit) {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,SeriesName,IndexNumber,ParentIndexNumber,RunTimeTicks,OfficialRating,Genres,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val requests = listOf(
             Triple("Continue watching", session.serverUrl + "/Users/" + user + "/Items/Resume?Limit=18&Fields=" + fields, MediaCardPresentation.LANDSCAPE),
             Triple("Next up", session.serverUrl + "/Shows/NextUp?UserId=" + user + "&Limit=18&Fields=" + fields, MediaCardPresentation.LANDSCAPE),
@@ -184,7 +184,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadMoviesIncrementally(session: NativeSession, onShelf: (MediaShelf) -> Unit) {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,OfficialRating,Genres,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val requests = listOf(
             Triple("Continue watching", session.serverUrl + "/Users/" + user + "/Items/Resume?IncludeItemTypes=Movie&Limit=12&Fields=" + fields, MediaCardPresentation.LANDSCAPE),
             Triple("Recently added", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Movie&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=18&Fields=" + fields, MediaCardPresentation.POSTER)
@@ -198,7 +198,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadShowsIncrementally(session: NativeSession, onShelf: (MediaShelf) -> Unit) {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,OfficialRating,Genres,SeriesName,IndexNumber,ParentIndexNumber,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val requests = listOf(
             Triple("Next up", session.serverUrl + "/Shows/NextUp?UserId=" + user + "&Limit=12&Fields=" + fields, MediaCardPresentation.LANDSCAPE),
             Triple("Recently added", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Series&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=18&Fields=" + fields, MediaCardPresentation.POSTER)
@@ -212,14 +212,14 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadMovies(session: NativeSession, startIndex: Int = 0, limit: Int = 50, sortBy: String = "SortName", sortOrder: String = "Ascending"): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Movie&Recursive=true&SortBy=" + sortBy + "&SortOrder=" + sortOrder + "&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadShows(session: NativeSession, startIndex: Int = 0, limit: Int = 50, sortBy: String = "SortName", sortOrder: String = "Ascending"): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Series&Recursive=true&SortBy=" + sortBy + "&SortOrder=" + sortOrder + "&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
@@ -265,14 +265,14 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadSeasons(session: NativeSession, seriesId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,SeriesName,SeriesId,IndexNumber,Overview,ChildCount,EpisodeCount,RecursiveItemCount"
+        val fields = JellyfinItemFields.SERIES_DETAILS
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Seasons?UserId=" + user + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadEpisodes(session: NativeSession, seriesId: String, seasonId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,OfficialRating,Genres,CriticRating,People"
+        val fields = JellyfinItemFields.EPISODE_DETAILS
         val normalizedSeriesId = seriesId.trim()
         val normalizedSeasonId = seasonId.trim()
         require(normalizedSeriesId.isNotEmpty()) { "Series id is required" }
@@ -330,7 +330,7 @@ class JellyfinNativeApi(private val context: Context) {
         // Queue construction needs stable identity/order, duration, and progress only. Requesting
         // full details artwork, People, Genres, and ratings makes large shows exceed a megabyte and
         // contend with the visible details requests long enough to reach the client timeout.
-        val fields = "PrimaryImageAspectRatio,ImageTags,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val fields = JellyfinItemFields.QUEUE
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) +
             "/Episodes?UserId=" + user + "&EnableUserData=true&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
@@ -338,7 +338,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadNextUpForSeries(session: NativeSession, seriesId: String): MediaItem? {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val fields = JellyfinItemFields.CARD
         val endpoint = session.serverUrl + "/Shows/NextUp?UserId=" + user + "&SeriesId=" + seriesId + "&Fields=" + fields
         return runCatching { parseItems(request(endpoint, token = session.token)).firstOrNull() }.getOrNull()
     }
@@ -360,7 +360,7 @@ class JellyfinNativeApi(private val context: Context) {
     fun loadNextEpisode(session: NativeSession, current: MediaItem): MediaItem? {
         val seriesId = current.seriesId ?: return null
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber"
+        val fields = JellyfinItemFields.CARD
         val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) + "/Episodes?UserId=" + user + "&Fields=" + fields + "&EnableUserData=true"
         val episodes = parseItems(request(endpoint, token = session.token))
         return NextEpisodeSelector.select(current.id, episodes)
@@ -374,7 +374,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadHero(session: NativeSession): MediaItem? {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview,CriticRating,People"
+        val fields = JellyfinItemFields.CARD_WITH_PEOPLE
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Movie&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=1&Fields=" + fields
         return parseItems(request(endpoint, token = session.token)).firstOrNull()
     }
@@ -388,7 +388,13 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     fun fetchItems(session: NativeSession, params: Map<String, String>): List<MediaItem> {
-        val query = params.entries.joinToString("&") { "${it.key}=${encode(it.value)}" }
+        val safeParams = params.mapNotNull { (key, value) ->
+            if (key != "Fields") return@mapNotNull key to value
+            JellyfinItemFields.normalize(value)
+                .takeIf(String::isNotEmpty)
+                ?.let { key to it }
+        }
+        val query = safeParams.joinToString("&") { (key, value) -> "$key=${encode(value)}" }
         val endpoint = "${session.serverUrl}/Users/${encode(session.userId)}/Items?$query"
         return parseItems(request(endpoint, token = session.token))
     }
@@ -540,7 +546,7 @@ class JellyfinNativeApi(private val context: Context) {
         query: String,
         itemTypes: List<String>
     ): List<MediaItem> {
-        val fields = "ImageTags,ProductionYear,UserData,RunTimeTicks,SeriesName,IndexNumber"
+        val fields = JellyfinItemFields.QUEUE
         val endpoint = session.serverUrl + "/Users/" + encode(session.userId) +
             "/Items?SearchTerm=" + encode(query) +
             "&Recursive=true&Limit=40&EnableTotalRecordCount=false&Fields=" + fields +
@@ -647,14 +653,14 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadSimilar(session: NativeSession, itemId: String, limit: Int = 12): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,RunTimeTicks,OfficialRating,CommunityRating,Genres,Studios,People,Artists,Album,AlbumArtist,AlbumId"
+        val fields = JellyfinItemFields.MUSIC_RECOMMENDATION
         val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/Similar?UserId=" + user + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadInstantMix(session: NativeSession, itemId: String, limit: Int = 48): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,DateCreated,UserData,RunTimeTicks,CommunityRating,Genres,Artists,Album,AlbumArtist,AlbumId,Container"
+        val fields = JellyfinItemFields.MUSIC_RECOMMENDATION
         val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/InstantMix?UserId=" + user + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
@@ -841,7 +847,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadMusicHomeIncrementally(session: NativeSession, onShelf: (MediaShelf) -> Unit) {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,Album,AlbumArtist,AlbumId"
+        val fields = JellyfinItemFields.MUSIC
         val requests = listOf(
             Triple("Recently played", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=DatePlayed&SortOrder=Descending&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE),
             Triple("Recently added albums", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=12&Fields=" + fields, MediaCardPresentation.SQUARE),
@@ -858,12 +864,12 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadReadingHomeIncrementally(session: NativeSession, onShelf: (MediaShelf) -> Unit) {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,SeriesName,IndexNumber,RunTimeTicks,OfficialRating,Genres,MediaSources"
+        val fields = JellyfinItemFields.READING
         val requests = listOf(
             Triple("Continue reading", session.serverUrl + "/Users/" + user + "/Items/Resume?IncludeItemTypes=Book&Limit=12&Fields=" + fields, MediaCardPresentation.POSTER),
             Triple("Recently added books", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Book&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=18&Fields=" + fields, MediaCardPresentation.POSTER),
             Triple("Book Series", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Series&Recursive=true&MediaTypes=Book&Limit=12&Fields=" + fields, MediaCardPresentation.POSTER),
-            Triple("Authors", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Person&MediaTypes=Book&Recursive=true&Limit=12&Fields=PrimaryImageAspectRatio,ImageTags", MediaCardPresentation.SQUARE)
+            Triple("Authors", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Person&MediaTypes=Book&Recursive=true&Limit=12&Fields=" + JellyfinItemFields.MUSIC, MediaCardPresentation.SQUARE)
         )
         requests.forEach { (title, endpoint, presentation) ->
             runCatching { parseItems(request(endpoint, token = session.token)) }.onSuccess { items ->
@@ -881,20 +887,20 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadArtists(session: NativeSession, startIndex: Int = 0, limit: Int = 50): List<MediaItem> {
         val user = encode(session.userId)
-        val endpoint = session.serverUrl + "/Artists?UserId=" + user + "&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=PrimaryImageAspectRatio,ImageTags"
+        val endpoint = session.serverUrl + "/Artists?UserId=" + user + "&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=" + JellyfinItemFields.MUSIC
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadAlbums(session: NativeSession, startIndex: Int = 0, limit: Int = 50, sortBy: String = "SortName", sortOrder: String = "Ascending"): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,AlbumArtist"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&SortBy=" + sortBy + "&SortOrder=" + sortOrder + "&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadSongs(session: NativeSession, startIndex: Int = 0, limit: Int = 50): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,Album,AlbumArtist,AlbumId,RunTimeTicks"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=SortName&SortOrder=Ascending&StartIndex=" + startIndex + "&Limit=" + limit + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
@@ -905,34 +911,34 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadPlaylists(session: NativeSession): List<MediaItem> {
         val user = encode(session.userId)
-        val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=PrimaryImageAspectRatio,ImageTags"
+        val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=" + JellyfinItemFields.MUSIC
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadAlbumSongs(session: NativeSession, albumId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,Album,AlbumArtist,AlbumId,RunTimeTicks,IndexNumber"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?ParentId=" + encode(albumId) + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadArtistAlbums(session: NativeSession, artistId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=MusicAlbum&Recursive=true&ArtistIds=" + encode(artistId) + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadPlaylistSongs(session: NativeSession, playlistId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,Album,AlbumArtist,AlbumId,RunTimeTicks"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Playlists/" + encode(playlistId) + "/Items?UserId=" + user + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
 
     fun loadArtistSongs(session: NativeSession, artistId: String): List<MediaItem> {
         val user = encode(session.userId)
-        val fields = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,Artists,Album,AlbumArtist,AlbumId,RunTimeTicks"
+        val fields = JellyfinItemFields.MUSIC
         val endpoint = session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Audio&Recursive=true&ArtistIds=" + encode(artistId) + "&Fields=" + fields
         return parseItems(request(endpoint, token = session.token))
     }
@@ -1142,17 +1148,7 @@ class JellyfinNativeApi(private val context: Context) {
             "Person"
         )
 
-        const val DETAILS_ARTWORK_FIELDS =
-            "BackdropImageTags,ParentBackdropItemId,ParentBackdropImageTags," +
-                "ParentLogoItemId,ParentLogoImageTag,ParentPrimaryImageItemId," +
-                "ParentPrimaryImageTag,ParentThumbItemId,ParentThumbImageTag," +
-                "SeriesPrimaryImageTag"
-
-        const val ITEM_RESOLUTION_FIELDS =
-            "PrimaryImageAspectRatio,ImageTags,$DETAILS_ARTWORK_FIELDS,ProductionYear," +
-                "UserData,RunTimeTicks,CommunityRating,OfficialRating,Genres,Overview," +
-                "MediaSources,Chapters,CriticRating,People,SeriesName,SeriesId,SeasonId," +
-                "IndexNumber,ParentIndexNumber,Artists,Album,AlbumArtist,AlbumId,Container"
+        const val ITEM_RESOLUTION_FIELDS = JellyfinItemFields.ITEM_DETAILS
 
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null

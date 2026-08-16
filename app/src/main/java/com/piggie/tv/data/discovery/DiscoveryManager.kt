@@ -3,6 +3,7 @@ package com.piggie.tv.data.discovery
 import android.util.Log
 import com.piggie.tv.data.api.HttpRequestFailure
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.api.JellyfinItemFields
 import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.api.SafeNetworkDiagnostic
 import com.piggie.tv.data.api.DebugDiscoveryFaultInjector
@@ -359,7 +360,7 @@ object DiscoveryManager {
                 val params = mutableMapOf<String, String>()
                 params["IncludeItemTypes"] = request.itemTypes.joinToString(",")
                 params["Recursive"] = "true"
-                params["Fields"] = "PrimaryImageAspectRatio,ImageTags,ProductionYear,UserData,OfficialRating,CommunityRating,Genres,RunTimeTicks"
+                params["Fields"] = JellyfinItemFields.CARD
                 
                 when (request.filter.type) {
                     DiscoveryFilterType.GENRE -> params["Genres"] = request.filter.value ?: ""

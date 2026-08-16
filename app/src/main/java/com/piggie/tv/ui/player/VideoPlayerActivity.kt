@@ -142,6 +142,9 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var playbackRequested = true
     @Volatile private var userExitRequested = false
     private var destroyed = false
+    private var playerReleasedForBackground = false
+    private var backgroundResumeItemId: String? = null
+    private var backgroundResumePositionTicks = 0L
     private var lastKnownPositionMs = 0L
     private var bufferingEvents = 0
     private val hideTemporaryStatus = Runnable { statusView.isVisible = false }
@@ -151,6 +154,9 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var failedSubtitleLoadUri: String? = null
     private var failedSubtitleLoadAtMs = 0L
     private var transcodeFallbackAttempted = false
+    private val networkRetryState = PlayerNetworkRetryState()
+    private var pendingNetworkRetry: Runnable? = null
+    private var networkRecoveryActive = false
 
     private var audioIndex: Int? = null
     private var subtitleIndex: Int? = null
@@ -415,6 +421,7 @@ class VideoPlayerActivity : AppCompatActivity() {
                         )
                     }
                     Player.STATE_READY -> {
+                        completeNetworkRecoveryIfNeeded()
                         statusView.isVisible = false
                         applyRequestedTrackSelection(player.currentTracks, allowRouteChange = true)
                         if (activityForeground) startProgressLoops()
@@ -459,15 +466,31 @@ class VideoPlayerActivity : AppCompatActivity() {
             override fun onPlayerError(error: PlaybackException) {
                 // Retry from the failure position, not the last 15-second reporting sample.
                 lastKnownPositionMs = playbackPositionMs()
+                // A failed external subtitle request can surface as a network error even when the
+                // main video route is healthy. Preserve its targeted server-side fallback before
+                // applying whole-stream network recovery.
                 if (attemptExternalSubtitleServerFallback(error)) return
-                if (attemptTranscodeFallback(error)) return
+                val networkError = PlayerErrorRecoveryPolicy.isTransientNetworkError(error.errorCode)
+                if (networkError) {
+                    if (attemptCurrentRouteNetworkRetry(error)) return
+                    cancelPendingNetworkRetry()
+                } else {
+                    cancelPendingNetworkRetry()
+                    if (attemptTranscodeFallback(error)) return
+                }
                 playbackError = true
                 stopProgressLoops()
                 PTVLog.e("Player error item=${PTVLog.mask(itemId)} code=${error.errorCodeName}", error)
                 PtvDiagnosticsManager.recordPlayback(
                     PtvPlaybackTrace(itemId = itemId, event = "player_error", detail = error.errorCodeName)
                 )
-                showStatus("Playback error. Press Select to retry or Back to exit.")
+                showStatus(
+                    if (networkError) {
+                        "Connection lost. Press Select to retry or Back to exit."
+                    } else {
+                        "Playback error. Press Select to retry or Back to exit."
+                    }
+                )
             }
         })
         player.addAnalyticsListener(object : AnalyticsListener {
@@ -502,6 +525,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         forceTranscode: Boolean = false
     ) {
         cancelPendingTrackRouteChange()
+        cancelPendingNetworkRetry()
         cancelAllApiWork()
         val requestedAt = android.os.SystemClock.elapsedRealtime()
         val generation = requestGeneration.incrementAndGet()
@@ -643,6 +667,8 @@ class VideoPlayerActivity : AppCompatActivity() {
         item.audioTracks.isNotEmpty() || item.subtitleTracks.isNotEmpty()
 
     private fun installPreparedPlayback(prepared: PreparedPlayback, startTicks: Long) {
+        cancelPendingNetworkRetry()
+        networkRetryState.reset()
         val selectedDetails = prepared.details.copy(
             mediaSourceId = prepared.stream.mediaSourceId,
             audioTracks = prepared.stream.audioTracks,
@@ -772,6 +798,146 @@ class VideoPlayerActivity : AppCompatActivity() {
         )
     }.getOrNull()
 
+    private fun attemptCurrentRouteNetworkRetry(error: PlaybackException): Boolean {
+        if (!PlayerErrorRecoveryPolicy.isTransientNetworkError(error.errorCode)) return false
+        val stream = currentStream ?: return false
+        if (
+            destroyed ||
+            userExitRequested ||
+            transitionInFlight.get() ||
+            player.mediaItemCount == 0
+        ) return false
+        // Media3 can deliver related callbacks while a retry is waiting. One claimed retry owns
+        // that failure and duplicate callbacks must not consume the remaining retry budget.
+        if (pendingNetworkRetry != null) return true
+
+        val retry = networkRetryState.claim(error.errorCode) ?: run {
+            PTVLog.e(
+                "Playback network retries exhausted item=${PTVLog.mask(itemId)} " +
+                    "code=${error.errorCodeName} attempts=${networkRetryState.attemptsUsed}",
+                error
+            )
+            PtvDiagnosticsManager.recordPlayback(
+                PtvPlaybackTrace(
+                    itemId = itemId,
+                    event = "network_retry_exhausted",
+                    detail = "${error.errorCodeName} attempts=${networkRetryState.attemptsUsed}",
+                    playMethod = stream.method
+                )
+            )
+            return false
+        }
+
+        val retryGeneration = requestGeneration.get()
+        val retryItemId = itemId
+        val retryPlaySessionId = playSessionId
+        val retryStream = stream
+        val retryPositionMs = lastKnownPositionMs
+        cancelPendingNetworkRetry()
+        networkRecoveryActive = true
+        playbackError = false
+        stopProgressLoops()
+        PTVLog.e(
+                "Playback connection failed; scheduling current-route retry " +
+                "item=${PTVLog.mask(retryItemId)} code=${error.errorCodeName} " +
+                "attempt=${retry.attempt}/${PlayerNetworkRetryState.maxAttempts} " +
+                "delayMs=${retry.delayMs} method=${stream.method}",
+            error
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = retryItemId,
+                event = "network_retry_scheduled",
+                detail = "${error.errorCodeName} attempt=${retry.attempt} delayMs=${retry.delayMs}",
+                playMethod = stream.method
+            )
+        )
+        showStatus(
+            "Connection interrupted. Retrying playback " +
+                "(${retry.attempt}/${PlayerNetworkRetryState.maxAttempts})..."
+        )
+
+        val retryAction = Runnable {
+            pendingNetworkRetry = null
+            if (
+                !networkRecoveryActive ||
+                destroyed ||
+                userExitRequested ||
+                retryGeneration != requestGeneration.get() ||
+                itemId != retryItemId ||
+                playSessionId != retryPlaySessionId ||
+                currentStream !== retryStream ||
+                player.mediaItemCount == 0
+            ) return@Runnable
+
+            PTVLog.i(
+                "Retrying installed playback route item=${PTVLog.mask(retryItemId)} " +
+                    "attempt=${retry.attempt} method=${retryStream.method}"
+            )
+            PtvDiagnosticsManager.recordPlayback(
+                PtvPlaybackTrace(
+                    itemId = retryItemId,
+                    event = "network_retry_started",
+                    detail = "attempt=${retry.attempt} positionMs=$retryPositionMs",
+                    playMethod = retryStream.method
+                )
+            )
+            showStatus("Reconnecting to the server...")
+            try {
+                player.seekTo(playerPositionMs(retryPositionMs))
+                player.prepare()
+                val shouldPlay = playbackRequested && activityForeground
+                player.playWhenReady = shouldPlay
+                if (shouldPlay) player.play()
+            } catch (retryError: Throwable) {
+                networkRecoveryActive = false
+                playbackError = true
+                stopProgressLoops()
+                PTVLog.e(
+                    "Unable to retry installed playback route item=${PTVLog.mask(retryItemId)}",
+                    retryError
+                )
+                PtvDiagnosticsManager.recordPlayback(
+                    PtvPlaybackTrace(
+                        itemId = retryItemId,
+                        event = "network_retry_command_failed",
+                        detail = retryError.javaClass.simpleName,
+                        playMethod = retryStream.method
+                    )
+                )
+                showStatus("Connection lost. Press Select to retry or Back to exit.")
+            }
+        }
+        pendingNetworkRetry = retryAction
+        handler.postDelayed(retryAction, retry.delayMs)
+        return true
+    }
+
+    private fun completeNetworkRecoveryIfNeeded() {
+        if (!networkRecoveryActive) return
+        val recoveredAfterAttempts = networkRetryState.attemptsUsed
+        cancelPendingNetworkRetry()
+        networkRetryState.reset()
+        PTVLog.i(
+            "Playback connection recovered item=${PTVLog.mask(itemId)} " +
+                "attempts=$recoveredAfterAttempts"
+        )
+        PtvDiagnosticsManager.recordPlayback(
+            PtvPlaybackTrace(
+                itemId = itemId,
+                event = "network_retry_recovered",
+                detail = "attempts=$recoveredAfterAttempts",
+                playMethod = currentStream?.method
+            )
+        )
+    }
+
+    private fun cancelPendingNetworkRetry() {
+        pendingNetworkRetry?.let { handler.removeCallbacks(it) }
+        pendingNetworkRetry = null
+        networkRecoveryActive = false
+    }
+
     private fun attemptExternalSubtitleServerFallback(error: PlaybackException): Boolean {
         val desired = requestedTrackSelection()
         if (sidecarFallbackAttemptedSelection == desired && transitionInFlight.get()) {
@@ -850,7 +1016,8 @@ class VideoPlayerActivity : AppCompatActivity() {
             destroyed ||
             userExitRequested ||
             transcodeFallbackAttempted ||
-            stream.method.equals("Transcode", ignoreCase = true)
+            stream.method.equals("Transcode", ignoreCase = true) ||
+            !PlayerErrorRecoveryPolicy.shouldAttemptTranscode(error.errorCode)
         ) return false
 
         transcodeFallbackAttempted = true
@@ -1392,9 +1559,16 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun restartCurrentItem() {
         if (currentItem == null || transitionInFlight.get()) return
+        cancelPendingNetworkRetry()
+        networkRetryState.reset()
         playbackRequested = true
         resetNextEpisodeState()
-        safePlayerAction("restart item seek", failAsError = true) { player.seekTo(0L) }
+        safePlayerAction("restart item prepare", failAsError = true) {
+            player.seekTo(0L)
+            // A fatal Media3 error leaves the player idle. Restart must prepare immediately so a
+            // canceled delayed reconnect cannot later move playback back to its failure position.
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        }
         lastKnownPositionMs = 0L
         safePlayerAction("restart item play", failAsError = true) {
             player.playWhenReady = true
@@ -1505,6 +1679,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         reason: String
     ) {
         if (!transitionInFlight.compareAndSet(false, true)) return
+        cancelPendingNetworkRetry()
         playbackRequested = true
 
         removeUpNextOverlay()
@@ -1752,6 +1927,28 @@ class VideoPlayerActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (!playerReleasedForBackground || destroyed || userExitRequested) return
+
+        val resumeItemId = backgroundResumeItemId
+            ?.takeIf(String::isNotBlank)
+            ?: itemId.takeIf(String::isNotBlank)
+        val resumeTicks = backgroundResumePositionTicks.coerceAtLeast(0L)
+        playerReleasedForBackground = false
+        backgroundResumeItemId = null
+        backgroundResumePositionTicks = 0L
+        createSinglePlayer()
+        showStatus("Restoring playback\u2026")
+        if (resumeItemId != null) {
+            prepareItem(
+                resumeItemId,
+                resumeTicks,
+                forceServerTrackSelection = serverTrackSelection != null
+            )
+        }
+    }
+
     override fun onPause() {
         activityForeground = false
         stopProgressLoops()
@@ -1779,9 +1976,59 @@ class VideoPlayerActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        val inPictureInPicture = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N &&
+            isInPictureInPictureMode
+        if (
+            ::player.isInitialized &&
+            !playerReleasedForBackground &&
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = isChangingConfigurations,
+                inPictureInPicture = inPictureInPicture,
+                finishing = isFinishing,
+                userExitRequested = userExitRequested
+            )
+        ) {
+            lastKnownPositionMs = playbackPositionMs()
+            backgroundResumeItemId = currentItem?.id ?: itemId
+            backgroundResumePositionTicks =
+                lastKnownPositionMs.coerceAtLeast(0L) * TICKS_PER_MILLISECOND
+            if (::session.isInitialized && !playSessionId.isNullOrBlank()) {
+                reportSessionStoppedAsync(
+                    itemId,
+                    playSessionId.orEmpty(),
+                    backgroundResumePositionTicks
+                )
+            }
+            requestGeneration.incrementAndGet()
+            transitionInFlight.set(false)
+            cancelPendingTrackRouteChange()
+            cancelPendingNetworkRetry()
+            cancelAllApiWork()
+            removeUpNextOverlay()
+            clearPlaybackSkipSegments()
+            mediaSession?.release()
+            mediaSession = null
+            playerView.player = null
+            player.release()
+            playerReleasedForBackground = true
+            playSessionId = null
+            currentStream = null
+            PtvDiagnosticsManager.recordPlayback(
+                PtvPlaybackTrace(
+                    itemId = itemId,
+                    event = "player_released_background",
+                    detail = "positionMs=$lastKnownPositionMs"
+                )
+            )
+        }
+        super.onStop()
+    }
+
     private fun requestUserExit() {
         if (userExitRequested || destroyed) return
         userExitRequested = true
+        cancelPendingNetworkRetry()
         activityForeground = false
         autoplayCanceled = true
         stopProgressLoops()
@@ -2091,6 +2338,7 @@ class VideoPlayerActivity : AppCompatActivity() {
             transitionInFlight.set(false)
             return
         }
+        cancelPendingNetworkRetry()
         val requested = requestedTrackSelection()
         val resumeAfterRoute = playbackRequested
         val selectionGeneration = trackSelectionGeneration
@@ -2239,6 +2487,7 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun restartPlayback(forceServerTrackSelection: Boolean = false) {
         if (!transitionInFlight.compareAndSet(false, true)) return
+        cancelPendingNetworkRetry()
         val positionTicks = PlayerRestartPolicy.positionTicks(playbackPositionMs())
         val currentId = itemId
         val currentSession = playSessionId.orEmpty()
@@ -2258,13 +2507,14 @@ class VideoPlayerActivity : AppCompatActivity() {
         destroyed = true
         requestGeneration.incrementAndGet()
         cancelPendingTrackRouteChange()
+        cancelPendingNetworkRetry()
         handler.removeCallbacks(restorePlayerDialogControllerTimeout)
         pendingPlayerDialogTimeoutRestoreToken = null
         playerDialogTimeoutState.clear()
         stopProgressLoops()
         removeUpNextOverlay()
         clearPlaybackSkipSegments()
-        if (::player.isInitialized) {
+        if (::player.isInitialized && !playerReleasedForBackground) {
             lastKnownPositionMs = playbackPositionMs()
             if (!isChangingConfigurations && ::itemId.isInitialized && ::session.isInitialized) {
                 reportStoppedAsyncIfNeeded()
@@ -2273,7 +2523,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         cancelAllApiWork()
         mediaSession?.release()
         mediaSession = null
-        if (::player.isInitialized) player.release()
+        if (::player.isInitialized && !playerReleasedForBackground) player.release()
         if (::itemId.isInitialized) {
             PtvDiagnosticsManager.recordPlayback(PtvPlaybackTrace(itemId = itemId, event = "player_released"))
         }

@@ -76,17 +76,7 @@ class JellyfinNativeApiSeriesDetailsRequestTest {
         assertNull(url.queryParameter("SeasonId"))
         assertNull(url.queryParameter("Limit"))
         assertEquals(
-            setOf(
-                "PrimaryImageAspectRatio",
-                "ImageTags",
-                "UserData",
-                "RunTimeTicks",
-                "SeriesName",
-                "SeriesId",
-                "SeasonId",
-                "IndexNumber",
-                "ParentIndexNumber"
-            ),
+            setOf("PrimaryImageAspectRatio"),
             url.queryParameter("Fields").orEmpty().split(',').toSet()
         )
         assertTrue(request.getHeader("X-Emby-Authorization").orEmpty().contains("Token="))

@@ -307,6 +307,32 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `episode queue actions stay visible and expose retry after a load failure`() {
+        val loading = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.LOADING)
+        val failed = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.FAILED)
+
+        assertFalse(loading.actionsEnabled)
+        assertEquals("Loading Episodes\u2026", loading.statusLabel)
+        assertFalse(loading.retryAvailable)
+        assertFalse(failed.actionsEnabled)
+        assertEquals("Retry Episodes", failed.statusLabel)
+        assertTrue(failed.retryAvailable)
+    }
+
+    @Test
+    fun `episode queue actions enable only after a nonempty queue loads`() {
+        val ready = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.READY)
+        val empty = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.EMPTY)
+
+        assertTrue(ready.actionsEnabled)
+        assertNull(ready.statusLabel)
+        assertFalse(ready.retryAvailable)
+        assertFalse(empty.actionsEnabled)
+        assertEquals("No Episodes Available", empty.statusLabel)
+        assertFalse(empty.retryAvailable)
+    }
+
+    @Test
     fun `full season details retain normalized nested route metadata`() {
         val seed = SeasonDetailsNavigationPolicy.routeItem(
             item("series", "Series").copy(
