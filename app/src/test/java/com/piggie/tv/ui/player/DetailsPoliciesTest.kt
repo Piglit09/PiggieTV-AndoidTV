@@ -307,6 +307,73 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `episode queue actions stay visible and expose retry after a load failure`() {
+        val loading = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.LOADING)
+        val failed = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.FAILED)
+
+        assertFalse(loading.actionsEnabled)
+        assertEquals("Loading Episodes\u2026", loading.statusLabel)
+        assertFalse(loading.retryAvailable)
+        assertFalse(failed.actionsEnabled)
+        assertEquals("Retry Episodes", failed.statusLabel)
+        assertTrue(failed.retryAvailable)
+    }
+
+    @Test
+    fun `episode queue actions enable only after a nonempty queue loads`() {
+        val ready = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.READY)
+        val empty = EpisodeQueueActionPolicy.decide(EpisodeQueueLoadState.EMPTY)
+
+        assertTrue(ready.actionsEnabled)
+        assertNull(ready.statusLabel)
+        assertFalse(ready.retryAvailable)
+        assertFalse(empty.actionsEnabled)
+        assertEquals("No Episodes Available", empty.statusLabel)
+        assertFalse(empty.retryAvailable)
+    }
+
+    @Test
+    fun `cached season starts episodes before details and reuses the same request state`() {
+        val season = item("season-1", "Season").copy(seriesId = "series-1")
+
+        assertTrue(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = null,
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.READY
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.isSettled(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertTrue(
+            SeasonEpisodeRequestPolicy.isSettled(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.READY
+            )
+        )
+    }
+
+    @Test
     fun `full season details retain normalized nested route metadata`() {
         val seed = SeasonDetailsNavigationPolicy.routeItem(
             item("series", "Series").copy(

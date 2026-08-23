@@ -239,15 +239,8 @@ class JellyfinNativeApiPlaybackRequestTest {
             .orEmpty()
             .split(',')
             .toSet()
-        assertTrue(fields.containsAll(setOf(
-            "SeriesId",
-            "SeasonId",
-            "SeriesName",
-            "IndexNumber",
-            "ParentIndexNumber",
-            "ParentLogoItemId",
-            "ParentLogoImageTag"
-        )))
+        assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
+        assertTrue(fields.containsAll(setOf("PrimaryImageAspectRatio", "MediaSources", "Chapters")))
     }
 
     @Test
@@ -286,7 +279,11 @@ class JellyfinNativeApiPlaybackRequestTest {
 
     @Test
     fun `episode shelves request inherited artwork metadata`() {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"Items":[]}"""))
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"Items":[{"Id":"episode-1","Name":"Pilot","Type":"Episode"}]}"""
+            )
+        )
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"Items":[]}"""))
         val session = NativeSession(
             token = "test-token",
@@ -306,19 +303,75 @@ class JellyfinNativeApiPlaybackRequestTest {
                 .orEmpty()
                 .split(',')
                 .toSet()
-            assertTrue(fields.containsAll(setOf(
-                "BackdropImageTags",
-                "ParentBackdropItemId",
-                "ParentBackdropImageTags",
-                "ParentLogoItemId",
-                "ParentLogoImageTag",
-                "ParentPrimaryImageItemId",
-                "ParentPrimaryImageTag",
-                "ParentThumbItemId",
-                "ParentThumbImageTag",
-                "SeriesPrimaryImageTag"
-            )))
+            assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
+            assertTrue("PrimaryImageAspectRatio" in fields)
         }
+    }
+
+    @Test
+    fun `season episodes fall back to direct parent query when shows endpoint is empty`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"Items":[]}"""))
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{
+                    "Items":[{
+                        "Id":"episode-4",
+                        "Name":"Recovered episode",
+                        "Type":"Episode",
+                        "IndexNumber":4
+                    }]
+                }""".trimIndent()
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val episodes = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadEpisodes(session, " series-1 ", " season-2 ")
+
+        assertEquals(listOf("episode-4"), episodes.map { it.id })
+        assertEquals("series-1", episodes.single().seriesId)
+        assertEquals("season-2", episodes.single().seasonId)
+
+        val primary = requireNotNull(server.takeRequest().requestUrl)
+        assertEquals("/Shows/series-1/Episodes", primary.encodedPath)
+        assertEquals("season-2", primary.queryParameter("SeasonId"))
+        assertEquals("true", primary.queryParameter("EnableUserData"))
+
+        val fallback = requireNotNull(server.takeRequest().requestUrl)
+        assertEquals("/Users/details-user/Items", fallback.encodedPath)
+        assertEquals("season-2", fallback.queryParameter("ParentId"))
+        assertEquals("Episode", fallback.queryParameter("IncludeItemTypes"))
+        assertEquals("true", fallback.queryParameter("Recursive"))
+        assertEquals("true", fallback.queryParameter("EnableUserData"))
+    }
+
+    @Test
+    fun `season episodes fall back to direct parent query when shows endpoint fails`() {
+        server.enqueue(MockResponse().setResponseCode(500).setBody("{}"))
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"Items":[{"Id":"episode-1","Name":"Pilot","Type":"Episode","SeriesId":"series-1","SeasonId":"season-1"}]}"""
+            )
+        )
+        val session = NativeSession(
+            token = "test-token",
+            serverId = "server",
+            userId = "details-user",
+            userName = "Codex",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+
+        val episodes = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+            .loadEpisodes(session, "series-1", "season-1")
+
+        assertEquals(listOf("episode-1"), episodes.map { it.id })
+        assertEquals(2, server.requestCount)
     }
 
     @Test
@@ -373,16 +426,12 @@ class JellyfinNativeApiPlaybackRequestTest {
             .orEmpty()
             .split(',')
             .toSet()
+        assertTrue(JellyfinItemFields.unsupported(fields.joinToString(",")).isEmpty())
         assertTrue(fields.containsAll(setOf(
-            "SeriesName",
-            "SeriesId",
-            "IndexNumber",
+            "PrimaryImageAspectRatio",
             "Overview",
             "ChildCount",
-            "EpisodeCount",
-            "RecursiveItemCount",
-            "ParentLogoItemId",
-            "ParentLogoImageTag"
+            "RecursiveItemCount"
         )))
     }
 }

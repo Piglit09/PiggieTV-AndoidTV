@@ -27,13 +27,13 @@ class ShowsFragment : BaseDiscoveryFragment() {
                 val resolvedSeries = linkedMapOf<String, MediaItem?>()
                 offerReadyCandidates(hostActivity, requestScope, episodes, resolvedSeries)
 
-                ShowsHeroCandidatePolicy.parentSeriesIds(episodes).forEach { seriesId ->
-                    if (requestScope.isCancelled) return@withRequestScope
-                    val series = runCatching { api.loadItem(session, seriesId) }.getOrNull()
-                    if (requestScope.isCancelled) return@withRequestScope
-                    resolvedSeries[seriesId] = series
-                    offerReadyCandidates(hostActivity, requestScope, episodes, resolvedSeries)
-                }
+                val seriesIds = ShowsHeroCandidatePolicy.parentSeriesIds(episodes)
+                val seriesById = runCatching { api.loadItems(session, seriesIds) }
+                    .getOrDefault(emptyList())
+                    .associateBy(MediaItem::id)
+                if (requestScope.isCancelled) return@withRequestScope
+                seriesIds.forEach { seriesId -> resolvedSeries[seriesId] = seriesById[seriesId] }
+                offerReadyCandidates(hostActivity, requestScope, episodes, resolvedSeries)
             }
         }
     }

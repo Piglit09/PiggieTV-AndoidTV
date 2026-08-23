@@ -18,9 +18,12 @@ import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import com.piggie.tv.R
 import com.piggie.tv.auth.MainActivity
+import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.api.SessionOrigin
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.playback.MusicPlaybackManager
+import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.navigation.NativePtvShell
 import com.piggie.tv.navigation.NativeRoute
@@ -35,18 +38,21 @@ import com.piggie.tv.ui.settings.SettingsFragment
 import com.piggie.tv.ui.shows.ShowsFragment
 import com.piggie.tv.ui.player.MediaDetailsFragment
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
-import com.piggie.tv.data.session.NativeSettings
+import com.piggie.tv.updates.ReleaseUpdateManager
 import com.piggie.tv.diagnostics.PerformanceMonitor
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvFocusTrace
 import com.piggie.tv.memory.MemoryPressurePolicy
 import com.piggie.tv.memory.MemoryPressureParticipant
+import kotlin.concurrent.thread
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.lang.ref.WeakReference
 
 class PtvHostActivity : AppCompatActivity() {
+    private val api by lazy { JellyfinNativeApi(this) }
     private val store by lazy { SecureSessionStore(this) }
+    private val releaseUpdateManager by lazy { ReleaseUpdateManager(this) }
     lateinit var session: NativeSession
     private lateinit var contentFrame: FrameLayout
     private var navigation = emptyMap<NativeRoute, Button>()
@@ -112,6 +118,7 @@ class PtvHostActivity : AppCompatActivity() {
         }
 
         PerformanceMonitor.setVisible(this, NativeSettings(this).diagnosticsOverlayEnabled)
+        refreshSessionForAdminAndCheckForUpdates()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -119,6 +126,20 @@ class PtvHostActivity : AppCompatActivity() {
         val requestedRoute = consumeRequestedRoute(intent)
         setIntent(intent)
         requestedRoute?.let(::showRoute)
+    }
+
+    private fun refreshSessionForAdminAndCheckForUpdates() {
+        thread {
+            val refreshedSession = runCatching { api.validateSession(session) }
+                .getOrElse { session }
+            if (refreshedSession.isAdministrator != session.isAdministrator) {
+                val origin = runCatching { store.origin() }.getOrDefault(SessionOrigin.STORED)
+                runCatching { store.save(refreshedSession, origin) }
+            }
+            val activeSession = refreshedSession
+            session = activeSession
+            releaseUpdateManager.checkForUpdates(activeSession, force = false, onResult = null)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
