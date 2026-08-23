@@ -29,6 +29,12 @@ private const val LOG_TAG = "JellyfinApi"
 data class ServerInfo(val name: String, val version: String)
 data class QuickConnectTicket(val secret: String, val code: String)
 
+private data class ParsedItemPage(
+    val items: List<MediaItem>,
+    val startIndex: Int?,
+    val totalRecordCount: Int?
+)
+
 data class NativeDiagnostics(
     val serverUrl: String,
     val serverId: String,
@@ -331,9 +337,33 @@ class JellyfinNativeApi(private val context: Context) {
         // full details artwork, People, Genres, and ratings makes large shows exceed a megabyte and
         // contend with the visible details requests long enough to reach the client timeout.
         val fields = JellyfinItemFields.QUEUE
-        val endpoint = session.serverUrl + "/Shows/" + encode(seriesId) +
-            "/Episodes?UserId=" + user + "&EnableUserData=true&Fields=" + fields
-        return parseItems(request(endpoint, token = session.token))
+        val baseEndpoint = session.serverUrl + "/Shows/" + encode(seriesId) +
+            "/Episodes?UserId=" + user + "&EnableUserData=true" +
+            "&EnableTotalRecordCount=true&Fields=" + fields
+        val episodes = LinkedHashMap<String, MediaItem>()
+        var startIndex = 0
+        var pageCount = 0
+        while (pageCount < SERIES_EPISODE_MAX_PAGES) {
+            val endpoint = baseEndpoint +
+                "&StartIndex=" + startIndex + "&Limit=" + SERIES_EPISODE_PAGE_SIZE
+            val page = parseItemPage(request(endpoint, token = session.token))
+            val previousSize = episodes.size
+            page.items.forEach { episode ->
+                episode.id.takeIf(String::isNotBlank)?.let { id -> episodes.putIfAbsent(id, episode) }
+            }
+            pageCount++
+
+            if (page.items.isEmpty()) break
+            val responseStart = page.startIndex?.coerceAtLeast(startIndex) ?: startIndex
+            val nextStartIndex = responseStart + page.items.size
+            val reachedReportedTotal = page.totalRecordCount?.let { nextStartIndex >= it } == true
+            val reachedShortUncountedPage = page.totalRecordCount == null &&
+                page.items.size < SERIES_EPISODE_PAGE_SIZE
+            val responseMadeNoProgress = episodes.size == previousSize
+            if (reachedReportedTotal || reachedShortUncountedPage || responseMadeNoProgress) break
+            startIndex = nextStartIndex
+        }
+        return episodes.values.toList()
     }
 
     fun loadNextUpForSeries(session: NativeSession, seriesId: String): MediaItem? {
@@ -987,11 +1017,18 @@ class JellyfinNativeApi(private val context: Context) {
         return policy.optBoolean("IsAdministrator", false)
     }
 
-    private fun parseItems(body: String): List<MediaItem> {
+    private fun parseItems(body: String): List<MediaItem> = parseItemPage(body).items
+
+    private fun parseItemPage(body: String): ParsedItemPage {
         val started = SystemClock.elapsedRealtime()
         return try {
-            val array = JSONObject(body).optJSONArray("Items") ?: JSONArray()
-            List(array.length()) { parseItem(array.optJSONObject(it)) }
+            val result = JSONObject(body)
+            val array = result.optJSONArray("Items") ?: JSONArray()
+            ParsedItemPage(
+                items = List(array.length()) { parseItem(array.optJSONObject(it)) },
+                startIndex = result.optInt("StartIndex", -1).takeIf { it >= 0 },
+                totalRecordCount = result.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+            )
         } finally {
             parseDurationMs.set(SystemClock.elapsedRealtime() - started)
         }
@@ -1135,6 +1172,8 @@ class JellyfinNativeApi(private val context: Context) {
         const val SEARCH_RESULT_BUDGET_MS = 9_000L
         const val SEARCH_CATEGORY_HINT_LIMIT = 40
         const val SEARCH_CATEGORY_CACHE_MAX_ENTRIES = 64
+        const val SERIES_EPISODE_PAGE_SIZE = 200
+        const val SERIES_EPISODE_MAX_PAGES = 100
         val SEARCH_CATEGORY_CACHE_TTL_NANOS = TimeUnit.MINUTES.toNanos(2)
 
         val ALL_SEARCH_CATEGORY_TYPES = setOf("Genre", "MusicGenre", "Studio")

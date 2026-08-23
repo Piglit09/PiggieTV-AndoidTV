@@ -253,7 +253,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         } else {
             renderLoadingIdentity()
         }
-        loadDetails(itemId)
+        val generation = loadDetails(itemId)
+        seed?.let { ensureSeasonEpisodeLoad(it, generation) }
         return root
     }
 
@@ -520,7 +521,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         actionsRow.removeAllViews()
     }
 
-    private fun loadDetails(requestedItemId: String) {
+    private fun loadDetails(requestedItemId: String): Int {
         cancelAllApiWork()
         val generation = ++requestGeneration
         launchApiWork(WORK_DETAILS, "ptv-details-$requestedItemId") {
@@ -553,6 +554,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                     }
                 }
         }
+        return generation
     }
 
     private fun isVideoTrackItem(item: MediaItem): Boolean =
@@ -1455,7 +1457,13 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             DetailsSecondaryLoadKind.SEASON_EPISODES -> {
                 seasonsContainer.visibility = View.GONE
                 relatedContainer.visibility = View.GONE
-                loadSeasonEpisodes(item, generation)
+                if (!ensureSeasonEpisodeLoad(item, generation)) {
+                    episodesSettled = SeasonEpisodeRequestPolicy.isSettled(
+                        item,
+                        currentSeasonId,
+                        seasonEpisodeQueueState
+                    )
+                }
             }
             DetailsSecondaryLoadKind.RELATED_ONLY -> {
                 seasonsContainer.visibility = View.GONE
@@ -1646,6 +1654,18 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                     }
                 }
         }
+    }
+
+    private fun ensureSeasonEpisodeLoad(season: MediaItem, generation: Int): Boolean {
+        if (
+            !SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                currentSeasonId,
+                seasonEpisodeQueueState
+            )
+        ) return false
+        loadSeasonEpisodes(season, generation)
+        return true
     }
 
     private fun showSeasonEpisodesFailure(
@@ -2079,7 +2099,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         renderPrimary(item, fullDetails)
         schedulePendingDetailsRestore()
         scroll.scrollTo(0, 0)
-        loadDetails(item.id)
+        val generation = loadDetails(item.id)
+        ensureSeasonEpisodeLoad(item, generation)
     }
 
     private fun reportInteractive() {

@@ -333,6 +333,47 @@ class DetailsPoliciesTest {
     }
 
     @Test
+    fun `cached season starts episodes before details and reuses the same request state`() {
+        val season = item("season-1", "Season").copy(seriesId = "series-1")
+
+        assertTrue(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = null,
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.shouldStart(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.READY
+            )
+        )
+        assertFalse(
+            SeasonEpisodeRequestPolicy.isSettled(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.LOADING
+            )
+        )
+        assertTrue(
+            SeasonEpisodeRequestPolicy.isSettled(
+                season,
+                activeSeasonId = "season-1",
+                state = EpisodeQueueLoadState.READY
+            )
+        )
+    }
+
+    @Test
     fun `full season details retain normalized nested route metadata`() {
         val seed = SeasonDetailsNavigationPolicy.routeItem(
             item("series", "Series").copy(

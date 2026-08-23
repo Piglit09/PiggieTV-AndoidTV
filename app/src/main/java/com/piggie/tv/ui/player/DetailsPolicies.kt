@@ -453,6 +453,33 @@ enum class EpisodeQueueLoadState {
     FAILED
 }
 
+/**
+ * Starts cached Season episode discovery before the full details refresh finishes, while keeping
+ * that refresh from replacing an in-flight or already-settled request for the same Season.
+ */
+object SeasonEpisodeRequestPolicy {
+    fun shouldStart(
+        season: MediaItem,
+        activeSeasonId: String?,
+        state: EpisodeQueueLoadState
+    ): Boolean {
+        val seasonId = season.id.trim()
+        if (!season.type.equals("Season", ignoreCase = true) || seasonId.isEmpty()) return false
+        return activeSeasonId?.trim() != seasonId || state == EpisodeQueueLoadState.NOT_REQUESTED
+    }
+
+    fun isSettled(
+        season: MediaItem,
+        activeSeasonId: String?,
+        state: EpisodeQueueLoadState
+    ): Boolean {
+        if (activeSeasonId?.trim() != season.id.trim()) return false
+        return state == EpisodeQueueLoadState.READY ||
+            state == EpisodeQueueLoadState.EMPTY ||
+            state == EpisodeQueueLoadState.FAILED
+    }
+}
+
 data class EpisodeQueueActionDecision(
     val actionsEnabled: Boolean,
     val statusLabel: String?,
