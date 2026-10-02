@@ -14,6 +14,7 @@ class SecureSessionStore(context: Context) {
             .putString("userId", session.userId)
             .putString("userName", session.userName)
             .putString("serverUrl", session.serverUrl)
+            .putBoolean("isAdministrator", session.isAdministrator)
             .putString("origin", origin.name)
             .apply()
     }
@@ -24,10 +25,13 @@ class SecureSessionStore(context: Context) {
         val userId = prefs.getString("userId", null) ?: return null
         val userName = prefs.getString("userName", null) ?: return null
         val serverUrl = prefs.getString("serverUrl", null) ?: return null
-        return NativeSession(token, serverId, userId, userName, serverUrl)
+        val isAdministrator = prefs.getBoolean("isAdministrator", false)
+        return NativeSession(token, serverId, userId, userName, serverUrl, isAdministrator)
     }
 
-    fun origin(): SessionOrigin = SessionOrigin.valueOf(prefs.getString("origin", SessionOrigin.STORED.name)!!)
+    fun origin(): SessionOrigin = runCatching {
+        SessionOrigin.valueOf(prefs.getString("origin", SessionOrigin.STORED.name) ?: SessionOrigin.STORED.name)
+    }.getOrElse { SessionOrigin.STORED }
 
     fun clear() {
         prefs.edit().clear().apply()

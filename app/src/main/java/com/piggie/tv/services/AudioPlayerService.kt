@@ -7,6 +7,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -78,8 +79,30 @@ class AudioPlayerService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        MUSIC_MIN_BUFFER_MS,
+                        MUSIC_MAX_BUFFER_MS,
+                        MUSIC_PLAYBACK_BUFFER_MS,
+                        MUSIC_REBUFFER_MS
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            )
             .build()
             .apply {
+                PtvDiagnosticsManager.event(
+                    "music",
+                    "playback_buffer_policy",
+                    mapOf(
+                        "minBufferMs" to MUSIC_MIN_BUFFER_MS.toString(),
+                        "maxBufferMs" to MUSIC_MAX_BUFFER_MS.toString(),
+                        "playbackBufferMs" to MUSIC_PLAYBACK_BUFFER_MS.toString(),
+                        "rebufferMs" to MUSIC_REBUFFER_MS.toString(),
+                        "queuePrefetch" to "media3_timeline"
+                    )
+                )
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_play_state", serviceState = "running", mediaSessionState = if (isPlaying) "playing" else "paused"))
@@ -271,4 +294,11 @@ class AudioPlayerService : MediaSessionService() {
 
     private fun androidx.media3.common.MediaItem.queueEntryId(): String? =
         mediaMetadata.extras?.getString(MUSIC_QUEUE_ENTRY_ID_EXTRA)
+
+    private companion object {
+        const val MUSIC_MIN_BUFFER_MS = 30_000
+        const val MUSIC_MAX_BUFFER_MS = 120_000
+        const val MUSIC_PLAYBACK_BUFFER_MS = 1_000
+        const val MUSIC_REBUFFER_MS = 2_500
+    }
 }

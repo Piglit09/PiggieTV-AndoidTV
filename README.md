@@ -2,7 +2,7 @@
 
 Native Android TV client for Jellyfin. High performance, zero WebView, built for the living room.
 
-## Current Status (v0.8.6 Beta)
+## Current Status (v0.8.8 Beta)
 PiggieTV has transitioned to its first controlled beta. Movies, Shows, and Music are unified under a high-performance native Shell.
 
 ## Key Features
@@ -20,3 +20,13 @@ Reading is not supported by the Android TV build and is not exposed through its 
 
 ## Development
 See [ARCHITECTURE.md](ARCHITECTURE.md) for data flow and design system details.
+
+## Version Bump
+
+The stable numeric app version comes from `piggietv.version` in `gradle.properties`. Beta packages append the build-channel suffix without changing that authoritative version. To advance the patch version once, run:
+
+```powershell
+.\scripts\bump-version.ps1
+```
+
+Patch and minor values run from `0` to `99`; after `0.0.99`, the script rolls to `0.1.0`. The script refuses to create a new major release automatically.

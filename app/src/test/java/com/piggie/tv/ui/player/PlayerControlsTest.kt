@@ -5,6 +5,9 @@ import android.os.Looper
 import android.widget.Button
 import android.widget.ImageButton
 import androidx.appcompat.app.AppCompatActivity
+import androidx.annotation.OptIn
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.util.UnstableApi
 import com.piggie.tv.R
 import com.piggie.tv.data.models.PlaybackSkipSegment
 import com.piggie.tv.data.models.PlaybackSkipSegmentType
@@ -21,6 +24,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows
 
+@OptIn(UnstableApi::class)
 @RunWith(RobolectricTestRunner::class)
 class PlayerControlsTest {
     @Test
@@ -114,6 +118,134 @@ class PlayerControlsTest {
         assertEquals(123_450_000L, PlayerRestartPolicy.positionTicks(12_345L))
         assertEquals(0L, PlayerRestartPolicy.positionTicks(-1L))
         assertTrue(PlayerRestartPolicy.positionTicks(1L) > 0L)
+    }
+
+    @Test
+    fun `fully backgrounded player releases its decoder ownership`() {
+        assertTrue(
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = false,
+                inPictureInPicture = false,
+                finishing = false,
+                userExitRequested = false
+            )
+        )
+    }
+
+    @Test
+    fun `configuration picture in picture and exits retain their existing lifecycle owner`() {
+        assertFalse(
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = true,
+                inPictureInPicture = false,
+                finishing = false,
+                userExitRequested = false
+            )
+        )
+        assertFalse(
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = false,
+                inPictureInPicture = true,
+                finishing = false,
+                userExitRequested = false
+            )
+        )
+        assertFalse(
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = false,
+                inPictureInPicture = false,
+                finishing = true,
+                userExitRequested = false
+            )
+        )
+        assertFalse(
+            PlayerBackgroundReleasePolicy.shouldRelease(
+                changingConfigurations = false,
+                inPictureInPicture = false,
+                finishing = false,
+                userExitRequested = true
+            )
+        )
+    }
+
+    @Test
+    fun `network recovery uses the bounded stall bridging schedule`() {
+        val state = PlayerNetworkRetryState()
+
+        assertEquals(
+            PlayerNetworkRetry(attempt = 1, delayMs = 2_000L),
+            state.claim(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        )
+        assertEquals(
+            PlayerNetworkRetry(attempt = 2, delayMs = 10_000L),
+            state.claim(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT)
+        )
+        assertEquals(
+            PlayerNetworkRetry(attempt = 3, delayMs = 30_000L),
+            state.claim(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        )
+        assertNull(state.claim(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED))
+        assertEquals(PlayerNetworkRetryState.maxAttempts, state.attemptsUsed)
+
+        state.reset()
+
+        assertEquals(0, state.attemptsUsed)
+        assertEquals(
+            PlayerNetworkRetry(attempt = 1, delayMs = 2_000L),
+            state.claim(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        )
+    }
+
+    @Test
+    fun `non-network errors do not consume current-route retries`() {
+        val state = PlayerNetworkRetryState()
+
+        assertNull(state.claim(PlaybackException.ERROR_CODE_TIMEOUT))
+        assertNull(state.claim(PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS))
+        assertNull(state.claim(PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
+        assertEquals(0, state.attemptsUsed)
+    }
+
+    @Test
+    fun `transcode fallback is limited to container and decoder compatibility failures`() {
+        val compatibleFallbackErrors = listOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+        )
+        compatibleFallbackErrors.forEach { errorCode ->
+            assertTrue(
+                "expected transcode fallback for error code $errorCode",
+                PlayerErrorRecoveryPolicy.shouldAttemptTranscode(errorCode)
+            )
+        }
+
+        val excludedErrors = listOf(
+            PlaybackException.ERROR_CODE_TIMEOUT,
+            PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+            PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+            PlaybackException.ERROR_CODE_DRM_UNSPECIFIED
+        )
+        excludedErrors.forEach { errorCode ->
+            assertFalse(
+                "did not expect transcode fallback for error code $errorCode",
+                PlayerErrorRecoveryPolicy.shouldAttemptTranscode(errorCode)
+            )
+        }
     }
 
     @Test

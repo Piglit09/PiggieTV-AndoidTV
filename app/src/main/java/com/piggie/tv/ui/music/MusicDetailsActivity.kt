@@ -314,10 +314,11 @@ class MusicDetailsActivity : AppCompatActivity() {
                 MusicDetailsRelatedPolicy.filter(
                     currentItemId = details.id,
                     currentItemType = details.type,
+                    currentItem = details,
                     candidates = api.loadSimilar(
                         session,
                         details.id,
-                        MusicDetailsRelatedPolicy.INITIAL_LIMIT + 1
+                        MusicDetailsRelatedPolicy.CANDIDATE_LIMIT
                     )
                 )
             }.onSuccess { related ->

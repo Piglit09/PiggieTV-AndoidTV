@@ -19,13 +19,16 @@ import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.MediaShelf
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.theme.PTVShapes
+import com.piggie.tv.ui.layout.TvHorizontalRecyclerView
 import com.piggie.tv.ui.layout.TvLinearLayoutManager
+import com.piggie.tv.ui.library.LibraryBrowserActivity
 import com.piggie.tv.ui.player.MediaDetailsActivity
 import com.piggie.tv.ui.rendering.applyRenderingTuning
 import com.piggie.tv.ui.widgets.MediaCardFactory
@@ -54,7 +57,12 @@ class SearchFragment : Fragment() {
     private var submittedQuery = ""
     private var focusedItemId: String? = null
     private var focusedControl = CONTROL_INPUT
+    private var selectedScope = SearchResultPolicy.Scope.ALL
     private var requestGeneration = 0
+    private var activeRequestScope: NativeRequestScope? = null
+    private val filterButtonIds = SearchResultPolicy.Scope.entries.associateWith {
+        View.generateViewId()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +70,9 @@ class SearchFragment : Fragment() {
         submittedQuery = savedInstanceState?.getString(STATE_SUBMITTED_QUERY).orEmpty()
         focusedItemId = savedInstanceState?.getString(STATE_FOCUSED_ITEM)
         focusedControl = savedInstanceState?.getString(STATE_FOCUSED_CONTROL) ?: CONTROL_INPUT
+        selectedScope = SearchResultPolicy.Scope.fromStored(
+            savedInstanceState?.getString(STATE_SELECTED_SCOPE)
+        )
     }
 
     override fun onCreateView(
@@ -122,11 +133,13 @@ class SearchFragment : Fragment() {
         outState.putString(STATE_SUBMITTED_QUERY, submittedQuery)
         outState.putString(STATE_FOCUSED_ITEM, focusedItemId)
         outState.putString(STATE_FOCUSED_CONTROL, focusedControl)
+        outState.putString(STATE_SELECTED_SCOPE, selectedScope.name)
     }
 
     override fun onDestroyView() {
         requestGeneration += 1
-        if (apiDelegate.isInitialized()) api.cancelInFlight()
+        activeRequestScope?.cancel()
+        activeRequestScope = null
         page?.adapter = null
         pageAdapter = null
         page = null
@@ -139,6 +152,9 @@ class SearchFragment : Fragment() {
 
         submittedQuery = query
         if (!retainFocusedItem) focusedItemId = null
+        val scope = selectedScope
+        activeRequestScope?.cancel()
+        val requestScope = NativeRequestScope().also { activeRequestScope = it }
         val generation = ++requestGeneration
         pageAdapter?.submitRows(
             listOf(
@@ -146,13 +162,40 @@ class SearchFragment : Fragment() {
                 SearchPageRow.Message("Searching…")
             )
         )
+        page?.post(::restoreFocus)
 
         thread(name = "ptv-search-$generation", start = true) {
-            runCatching { api.search(session, query) }
+            runCatching {
+                api.withRequestScope(requestScope) {
+                    api.searchIncrementally(
+                        session = session,
+                        query = query,
+                        itemTypes = scope.itemTypes,
+                        includeGenres = scope.includeGenres,
+                        includeStudios = scope.includeStudios,
+                        onPartialResults = { partialItems ->
+                            activity?.runOnUiThread {
+                                if (!canApply(generation)) return@runOnUiThread
+                                val shelves = SearchResultPolicy.shelves(partialItems, scope)
+                                if (shelves.isNotEmpty()) {
+                                    pageAdapter?.submitRows(
+                                        buildList {
+                                            add(SearchPageRow.Header)
+                                            shelves.forEach { add(SearchPageRow.Shelf(it)) }
+                                        }
+                                    )
+                                    page?.post(::restoreFocus)
+                                }
+                            }
+                        }
+                    )
+                }
+            }
                 .onSuccess { items ->
                     activity?.runOnUiThread {
                         if (!canApply(generation)) return@runOnUiThread
-                        val shelves = SearchResultPolicy.shelves(items)
+                        if (activeRequestScope === requestScope) activeRequestScope = null
+                        val shelves = SearchResultPolicy.shelves(items, scope)
                         val rows = if (shelves.isEmpty()) {
                             listOf(
                                 SearchPageRow.Header,
@@ -171,6 +214,7 @@ class SearchFragment : Fragment() {
                 .onFailure { error ->
                     activity?.runOnUiThread {
                         if (!canApply(generation)) return@runOnUiThread
+                        if (activeRequestScope === requestScope) activeRequestScope = null
                         val detail = error.message?.takeIf { it.isNotBlank() } ?: "Unknown error"
                         pageAdapter?.submitRows(
                             listOf(
@@ -181,6 +225,26 @@ class SearchFragment : Fragment() {
                         page?.post(::restoreFocus)
                     }
                 }
+        }
+    }
+
+    private fun selectScope(scope: SearchResultPolicy.Scope) {
+        if (selectedScope == scope) return
+        selectedScope = scope
+        focusedControl = scope.controlKey
+        focusedItemId = null
+        pageAdapter?.refreshHeader()
+
+        val query = SearchResultPolicy.normalizeQuery(draftQuery)
+        if (query.isBlank()) {
+            submittedQuery = ""
+            requestGeneration += 1
+            activeRequestScope?.cancel()
+            activeRequestScope = null
+            pageAdapter?.submitRows(listOf(SearchPageRow.Header))
+            page?.post(::restoreFocus)
+        } else {
+            performSearch(query)
         }
     }
 
@@ -219,6 +283,10 @@ class SearchFragment : Fragment() {
         fun submitRows(updated: List<SearchPageRow>) {
             rows = updated
             notifyDataSetChanged()
+        }
+
+        fun refreshHeader() {
+            if (rows.firstOrNull() == SearchPageRow.Header) notifyItemChanged(0)
         }
 
         override fun getItemId(position: Int): Long = when (val row = rows[position]) {
@@ -369,7 +437,30 @@ class SearchFragment : Fragment() {
                 }
             )
             content.addView(row)
-            return HeaderHolder(content, input, searchButton)
+
+            val scopeAdapter = SearchScopeAdapter(input.id, searchButton.id)
+            val scopeManager = TvLinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
+            val scopeRecycler = TvHorizontalRecyclerView(context).apply {
+                id = View.generateViewId()
+                layoutManager = scopeManager
+                adapter = scopeAdapter
+                applyRenderingTuning(scopeManager, visibleItems = SearchResultPolicy.Scope.entries.size)
+                isFocusable = false
+                isNestedScrollingEnabled = false
+                descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                clipChildren = false
+                clipToPadding = false
+                setPadding(0, context.dim(R.dimen.tv_spacing_small), 0, 0)
+            }
+            content.addView(
+                scopeRecycler,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    context.dim(R.dimen.tv_nav_button_height) +
+                        context.dim(R.dimen.tv_spacing_medium)
+                )
+            )
+            return HeaderHolder(content, input, searchButton, scopeRecycler, scopeAdapter)
         }
 
         private fun createShelfHolder(parent: ViewGroup): ShelfHolder {
@@ -405,10 +496,100 @@ class SearchFragment : Fragment() {
         }
     }
 
+    private inner class SearchScopeAdapter(
+        private val inputId: Int,
+        private val searchButtonId: Int
+    ) : RecyclerView.Adapter<SearchScopeAdapter.ScopeHolder>() {
+        private val scopes = SearchResultPolicy.Scope.entries
+
+        init {
+            setHasStableIds(true)
+        }
+
+        override fun getItemId(position: Int): Long = scopes[position].ordinal.toLong()
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ScopeHolder {
+            val context = parent.context
+            val button = Button(context).apply {
+                isAllCaps = false
+                isFocusable = true
+                setTextSizeRes(R.dimen.tv_nav_text_size)
+                setTextColor(context.getColor(R.color.tv_text_primary))
+                minimumWidth = 0
+                minWidth = 0
+                minimumHeight = 0
+                minHeight = 0
+                setPadding(
+                    context.dim(R.dimen.tv_spacing_large),
+                    0,
+                    context.dim(R.dimen.tv_spacing_large),
+                    0
+                )
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    context.dim(R.dimen.tv_nav_button_height)
+                ).apply {
+                    marginEnd = context.dim(R.dimen.tv_spacing_small)
+                }
+            }
+            return ScopeHolder(button)
+        }
+
+        override fun onBindViewHolder(holder: ScopeHolder, position: Int) {
+            holder.bind(scopes[position], position)
+        }
+
+        override fun onViewRecycled(holder: ScopeHolder) {
+            holder.recycle()
+            super.onViewRecycled(holder)
+        }
+
+        override fun getItemCount(): Int = scopes.size
+
+        inner class ScopeHolder(private val button: Button) : RecyclerView.ViewHolder(button) {
+            fun bind(scope: SearchResultPolicy.Scope, position: Int) {
+                button.id = requireNotNull(filterButtonIds[scope])
+                button.text = scope.label
+                button.contentDescription = if (scope == selectedScope) {
+                    "${scope.label}, selected search category"
+                } else {
+                    "${scope.label}, search category"
+                }
+                button.setBackgroundResource(
+                    if (scope == selectedScope) {
+                        R.drawable.tv_button_primary
+                    } else {
+                        R.drawable.tv_button_secondary
+                    }
+                )
+                button.nextFocusUpId = if (position >= scopes.lastIndex - 1) {
+                    searchButtonId
+                } else {
+                    inputId
+                }
+                button.setOnClickListener { selectScope(scope) }
+                button.setOnFocusChangeListener { view, focused ->
+                    PTVShapes.applyFocusEffect(view, focused)
+                    if (focused) {
+                        focusedControl = scope.controlKey
+                        focusedItemId = null
+                    }
+                }
+            }
+
+            fun recycle() {
+                button.setOnClickListener(null)
+                button.setOnFocusChangeListener(null)
+            }
+        }
+    }
+
     private inner class HeaderHolder(
         view: View,
         private val input: EditText,
-        private val searchButton: Button
+        private val searchButton: Button,
+        private val scopeRecycler: RecyclerView,
+        private val scopeAdapter: SearchScopeAdapter
     ) : RecyclerView.ViewHolder(view) {
         private var binding = false
 
@@ -463,10 +644,27 @@ class SearchFragment : Fragment() {
                 input.setSelection(selection.coerceAtMost(draftQuery.length))
                 binding = false
             }
+            scopeAdapter.notifyDataSetChanged()
+            val selectedButtonId = requireNotNull(filterButtonIds[selectedScope])
+            input.nextFocusDownId = selectedButtonId
+            searchButton.nextFocusDownId = selectedButtonId
         }
 
         fun requestFocus(control: String) {
-            if (control == CONTROL_BUTTON) searchButton.requestFocus() else input.requestFocus()
+            val scope = SearchResultPolicy.Scope.fromControlKey(control)
+            when {
+                scope != null -> {
+                    val position = scope.ordinal
+                    scopeRecycler.scrollToPosition(position)
+                    scopeRecycler.post {
+                        scopeRecycler.findViewHolderForAdapterPosition(position)
+                            ?.itemView
+                            ?.requestFocus()
+                    }
+                }
+                control == CONTROL_BUTTON -> searchButton.requestFocus()
+                else -> input.requestFocus()
+            }
         }
 
         private fun submit() {
@@ -534,7 +732,14 @@ class SearchFragment : Fragment() {
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val item = items[position]
             MediaCardFactory.bindView(holder, item, presentation, session, api)
-            holder.itemView.setOnClickListener { MediaDetailsActivity.start(it.context, item) }
+            holder.itemView.setOnClickListener { view ->
+                val browseRequest = SearchResultPolicy.categoryBrowseRequest(item)
+                if (browseRequest != null) {
+                    LibraryBrowserActivity.start(view.context, browseRequest)
+                } else {
+                    MediaDetailsActivity.start(view.context, item)
+                }
+            }
             holder.itemView.setOnFocusChangeListener { view, focused ->
                 PTVShapes.applyFocusEffect(view, focused)
                 if (focused) {
@@ -577,5 +782,6 @@ class SearchFragment : Fragment() {
         const val STATE_SUBMITTED_QUERY = "search.submitted_query"
         const val STATE_FOCUSED_ITEM = "search.focused_item"
         const val STATE_FOCUSED_CONTROL = "search.focused_control"
+        const val STATE_SELECTED_SCOPE = "search.selected_scope"
     }
 }

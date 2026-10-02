@@ -1,6 +1,7 @@
 package com.piggie.tv.ui.music
 
 import com.piggie.tv.data.models.MediaItem
+import com.piggie.tv.data.recommendations.PremiumRecommendationRanker
 
 enum class MusicArtworkSource {
     ARTIST_BACKDROP,
@@ -203,6 +204,7 @@ object MusicDetailsArtworkPolicy {
 
 object MusicDetailsRelatedPolicy {
     const val INITIAL_LIMIT = 16
+    const val CANDIDATE_LIMIT = 48
 
     fun title(itemType: String): String =
         if (itemType.equals("MusicArtist", ignoreCase = true)) {
@@ -214,19 +216,28 @@ object MusicDetailsRelatedPolicy {
     fun filter(
         currentItemId: String,
         currentItemType: String,
-        candidates: List<MediaItem>
+        candidates: List<MediaItem>,
+        currentItem: MediaItem? = null
     ): List<MediaItem> {
         val allowedTypes = if (currentItemType.equals("MusicArtist", ignoreCase = true)) {
             setOf("musicartist")
         } else {
             setOf("musicalbum", "musicartist", "playlist")
         }
-        return candidates.asSequence()
+        val filtered = candidates.asSequence()
             .filter { it.id.isNotBlank() && it.id != currentItemId }
             .filter { it.type.lowercase() in allowedTypes }
             .distinctBy(MediaItem::id)
-            .take(INITIAL_LIMIT)
             .toList()
+
+        return currentItem?.let { seed ->
+            PremiumRecommendationRanker.rankRelated(
+                seed = seed,
+                candidates = filtered,
+                allowedTypes = allowedTypes,
+                limit = INITIAL_LIMIT
+            )
+        } ?: filtered.take(INITIAL_LIMIT)
     }
 }
 

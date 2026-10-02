@@ -55,6 +55,10 @@ class NativeSettings(context: Context) {
         get() = prefs.getBoolean("diagnostics_overlay_enabled", false)
         set(value) = prefs.edit().putBoolean("diagnostics_overlay_enabled", value).apply()
 
+    var notifyBetaReleases: Boolean
+        get() = prefs.getBoolean("notify_beta_releases", false)
+        set(value) = prefs.edit().putBoolean("notify_beta_releases", value).apply()
+
     var reduceMotion: Boolean
         get() = prefs.getBoolean("reduce_motion", false)
         set(value) = prefs.edit().putBoolean("reduce_motion", value).apply()

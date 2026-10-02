@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import coil.Coil
 import coil.annotation.ExperimentalCoilApi
+import com.piggie.tv.BuildConfig
 import com.piggie.tv.R
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
@@ -38,6 +39,8 @@ import com.piggie.tv.theme.PTVShapes
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.widgets.PtvSelectionDialog
+import com.piggie.tv.updates.ReleaseCheckResult
+import com.piggie.tv.updates.ReleaseUpdateManager
 import com.piggie.tv.util.CrashReporter
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
@@ -48,6 +51,7 @@ class SettingsFragment : Fragment() {
     private val api by lazy { JellyfinNativeApi(requireContext()) }
     private val store by lazy { SecureSessionStore(requireContext()) }
     private val settings by lazy { NativeSettings(requireContext()) }
+    private val releaseUpdateManager by lazy { ReleaseUpdateManager(requireContext()) }
     private lateinit var session: NativeSession
     private lateinit var root: FrameLayout
 
@@ -76,7 +80,7 @@ class SettingsFragment : Fragment() {
         )
         
         page.addView(label("Settings", context.sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true))
-        page.addView(label("v0.8.6-beta.1  •  ${session.userName}", context.sp(R.dimen.tv_text_size_body), R.color.tv_text_secondary, margin = 8))
+        page.addView(label("v${BuildConfig.VERSION_NAME}  •  ${session.userName}", context.sp(R.dimen.tv_text_size_body), R.color.tv_text_secondary, margin = 8))
         
         val connectionSpeedButton = settingsButton(
             page,
@@ -91,6 +95,32 @@ class SettingsFragment : Fragment() {
         settingsButton(page, "Subtitles: ${settings.subtitlePreference}") {
             cycleSubtitles()
             showSettings()
+        }
+        val betaLabel = when {
+            session.isAdministrator -> "On (admin)"
+            settings.notifyBetaReleases -> "On"
+            else -> "Off"
+        }
+        settingsButton(page, "Beta release alerts: $betaLabel") {
+            if (!session.isAdministrator) {
+                settings.notifyBetaReleases = !settings.notifyBetaReleases
+                showSettings()
+            }
+        }
+        settingsButton(page, "Check for app updates") {
+            Toast.makeText(context, "Checking for updates...", Toast.LENGTH_SHORT).show()
+            releaseUpdateManager.checkForUpdates(
+                session,
+                force = true
+            ) { result ->
+                val message = when (result) {
+                    is ReleaseCheckResult.Available -> "New release: ${result.release.displayName}"
+                    is ReleaseCheckResult.UpToDate -> result.message
+                    is ReleaseCheckResult.Skipped -> result.message
+                    is ReleaseCheckResult.Error -> "Update check failed: ${result.message.ifBlank { "No details available" }}"
+                }
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }
         }
         settingsButton(page, "Clear Image Cache") {
             Coil.imageLoader(requireContext()).memoryCache?.clear()

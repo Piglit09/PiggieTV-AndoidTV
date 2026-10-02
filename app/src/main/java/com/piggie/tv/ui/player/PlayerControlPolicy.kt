@@ -1,5 +1,6 @@
 package com.piggie.tv.ui.player
 
+import androidx.media3.common.PlaybackException
 import com.piggie.tv.data.models.PlaybackSkipSegment
 import com.piggie.tv.data.models.PlaybackSkipSegmentType
 import java.util.concurrent.ConcurrentHashMap
@@ -72,6 +73,86 @@ object PlayerRestartPolicy {
 
     fun positionTicks(positionMs: Long): Long =
         positionMs.coerceAtLeast(0L) * TICKS_PER_MILLISECOND
+}
+
+/**
+ * A TV player activity that is fully hidden must not retain its codec until Android happens to
+ * destroy the activity. Configuration changes and picture-in-picture keep ownership in place;
+ * ordinary backgrounding releases and later renegotiates from the captured position.
+ */
+internal object PlayerBackgroundReleasePolicy {
+    fun shouldRelease(
+        changingConfigurations: Boolean,
+        inPictureInPicture: Boolean,
+        finishing: Boolean,
+        userExitRequested: Boolean
+    ): Boolean = !changingConfigurations &&
+        !inPictureInPicture &&
+        !finishing &&
+        !userExitRequested
+}
+
+/**
+ * Separates transient transport recovery from format compatibility recovery.
+ *
+ * A different Jellyfin route cannot repair a stalled server connection. Network failures retry
+ * the already installed Media3 item so they do not create a new play session or wait on another
+ * PlaybackInfo request. Transcoding is reserved for failures where changing the container or
+ * codecs can actually help.
+ */
+internal object PlayerErrorRecoveryPolicy {
+    fun isTransientNetworkError(errorCode: Int): Boolean = when (errorCode) {
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> true
+        else -> false
+    }
+
+    fun shouldAttemptTranscode(errorCode: Int): Boolean = when (errorCode) {
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> true
+        else -> false
+    }
+}
+
+internal data class PlayerNetworkRetry(
+    val attempt: Int,
+    val delayMs: Long
+)
+
+/** Claims the bounded retry schedule for one installed playback stream. */
+internal class PlayerNetworkRetryState(
+    retryDelaysMs: LongArray = DEFAULT_RETRY_DELAYS_MS
+) {
+    private val retryDelaysMs = retryDelaysMs.copyOf()
+
+    var attemptsUsed: Int = 0
+        private set
+
+    init {
+        require(this.retryDelaysMs.all { it >= 0L }) { "Retry delays must be non-negative" }
+    }
+
+    fun claim(errorCode: Int): PlayerNetworkRetry? {
+        if (!PlayerErrorRecoveryPolicy.isTransientNetworkError(errorCode)) return null
+        val delayMs = retryDelaysMs.getOrNull(attemptsUsed) ?: return null
+        attemptsUsed += 1
+        return PlayerNetworkRetry(attempt = attemptsUsed, delayMs = delayMs)
+    }
+
+    fun reset() {
+        attemptsUsed = 0
+    }
+
+    companion object {
+        private val DEFAULT_RETRY_DELAYS_MS = longArrayOf(2_000L, 10_000L, 30_000L)
+        val maxAttempts: Int
+            get() = DEFAULT_RETRY_DELAYS_MS.size
+    }
 }
 
 internal data class PlaybackStopReport(

@@ -7,7 +7,8 @@ data class NativeSession(
     val serverId: String,
     val userId: String,
     val userName: String,
-    val serverUrl: String
+    val serverUrl: String,
+    val isAdministrator: Boolean = false
 ) {
     fun isComplete(): Boolean {
         val server = serverUrl.toHttpUrlOrNull()

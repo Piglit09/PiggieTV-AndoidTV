@@ -1,5 +1,13 @@
 import java.util.Properties
 
+fun piggieTvVersionCode(versionName: String): Int {
+    val match = Regex("^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{1,2})$").matchEntire(versionName)
+        ?: error("piggietv.version must use major.minor.patch with fields from 0 through 99: $versionName")
+    val (major, minor, patch) = match.destructured.toList().map(String::toInt)
+
+    return major * 1_000_000 + minor * 10_000 + patch * 100 + 99
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,6 +20,9 @@ val localProperties = Properties().apply {
     }
 }
 
+val piggieTvVersion = providers.gradleProperty("piggietv.version").orNull
+    ?: error("Missing piggietv.version in gradle.properties")
+
 android {
     namespace = "com.piggie.tv"
     compileSdk = 35
@@ -20,8 +31,8 @@ android {
         applicationId = "com.piggie.tv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.8.6-beta.1"
+        versionCode = piggieTvVersionCode(piggieTvVersion)
+        versionName = piggieTvVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -45,7 +56,7 @@ android {
         create("beta") {
             initWith(getByName("release"))
             applicationIdSuffix = ".beta"
-            versionNameSuffix = "-beta"
+            versionNameSuffix = "-beta.1"
             signingConfig = signingConfigs.getByName("beta")
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
