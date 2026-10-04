@@ -24,13 +24,14 @@ class HomeDiscoveryQueryManifestTest {
         assertFalse(home.any { it.title.contains("Collection", true) })
     }
 
-    @Test fun showsContinueWatchingRequestsPlayableEpisodes() {
+    @Test fun showsLibraryPageRequestsOnlySeriesWithinItsResolvedRoot() {
         val definition = DiscoveryManager.manifest(DiscoveryPage.SHOWS).shelves
-            .single { it.id == "shows.continue" }
+            .single { it.id == "shows.library" }
         val plan = DiscoveryManager.queryManifest(definition)
 
-        assertEquals(listOf("Episode"), definition.itemTypes)
-        assertEquals("Episode", plan.filters["IncludeItemTypes"])
-        assertEquals("/Users/[user]/Items/Resume", plan.endpoint)
+        assertEquals(listOf("Series"), definition.itemTypes)
+        assertEquals("Shows", definition.libraryName)
+        assertEquals("Series", plan.filters["IncludeItemTypes"])
+        assertEquals("/Users/[user]/Items", plan.endpoint)
     }
 }

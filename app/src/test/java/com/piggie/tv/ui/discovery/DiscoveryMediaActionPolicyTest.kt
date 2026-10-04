@@ -1,6 +1,7 @@
 package com.piggie.tv.ui.discovery
 
 import com.piggie.tv.data.discovery.DiscoveryShelfType
+import com.piggie.tv.data.discovery.DiscoveryFilterType
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -10,6 +11,17 @@ class DiscoveryMediaActionPolicyTest {
         assertEquals(
             DiscoveryMediaAction.RESUME_PLAYBACK,
             DiscoveryMediaActionPolicy.resolve("Episode", DiscoveryShelfType.CONTINUE_WATCHING)
+        )
+    }
+
+    @Test
+    fun scopedMoviesContinueWatchingStillResumes() {
+        assertEquals(
+            DiscoveryMediaAction.RESUME_PLAYBACK,
+            DiscoveryMediaActionPolicy.resolve(
+                "Movie", DiscoveryShelfType.LIBRARY_SPECIFIC,
+                DiscoveryFilterType.CONTINUE_WATCHING
+            )
         )
     }
 

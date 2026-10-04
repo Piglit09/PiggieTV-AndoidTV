@@ -3,11 +3,15 @@ package com.piggie.tv.ui.player
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.view.View
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import com.piggie.tv.R
+import com.piggie.tv.auth.AuthLogout
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.models.MediaItem
+import com.piggie.tv.data.models.NativeSession
+import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.ui.rendering.DetailsArchitecture
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.player.DetailsNavigationPolicy
@@ -18,9 +22,22 @@ import com.piggie.tv.ui.player.MediaDetailsSeedStore
  * fragment, eliminating the former activity/fragment details split.
  */
 class MediaDetailsActivity : AppCompatActivity() {
+    private val store by lazy { SecureSessionStore(this) }
+    private var activeSession: NativeSession? = null
+    val session: NativeSession
+        get() = requireNotNull(activeSession) { "An authenticated session is required" }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
+        activeSession = AuthSessionCoordinator.validatedSession(store)
+        if (activeSession == null) {
+            // Do not restore a saved details Fragment that would synchronously request a session.
+            super.onCreate(null)
+            startActivity(AuthLogout.loginIntent(this))
+            finish()
+            return
+        }
         super.onCreate(savedInstanceState)
         window.setWindowAnimations(0)
 
@@ -28,7 +45,9 @@ class MediaDetailsActivity : AppCompatActivity() {
             finish()
             return
         }
-        val container = FrameLayout(this).apply { id = View.generateViewId() }
+        // A stable resource ID lets FragmentManager reattach the restored canonical fragment
+        // after configuration recreation.
+        val container = FrameLayout(this).apply { id = R.id.ptv_details_container }
         setContentView(container)
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
@@ -48,6 +67,11 @@ class MediaDetailsActivity : AppCompatActivity() {
         super.finish()
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
+    }
+
+    override fun onDestroy() {
+        activeSession = null
+        super.onDestroy()
     }
 
     companion object {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <!-- One static text-edge fade leaves feature artwork dominant on both Fire TV profiles. -->
+    <gradient
+        android:angle="0"
+        android:startColor="#D9050912"
+        android:centerColor="#660B1020"
+        android:endColor="#000B1020" />
+</shape>

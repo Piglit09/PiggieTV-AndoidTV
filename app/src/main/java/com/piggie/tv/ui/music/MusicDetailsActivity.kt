@@ -26,6 +26,7 @@ import androidx.recyclerview.widget.RecyclerView
 import coil.dispose
 import coil.load
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.models.MediaItem
@@ -92,7 +93,7 @@ class MusicDetailsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.setWindowAnimations(0)
 
-        session = store.read() ?: run {
+        session = AuthSessionCoordinator.validatedSession(store) ?: run {
             finish()
             return
         }

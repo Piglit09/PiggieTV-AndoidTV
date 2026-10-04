@@ -3,6 +3,7 @@ package com.piggie.tv.data.api
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.piggie.tv.auth.AuthSessionCoordinator
 import android.os.SystemClock
 import com.piggie.tv.data.models.*
 import com.piggie.tv.data.discovery.DiscoveryQueryPlanner
@@ -22,12 +23,26 @@ import java.util.UUID
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 private const val LOG_TAG = "JellyfinApi"
+private val playbackReportDispatcher = PlaybackReportDispatcher()
+private val playbackReportRequestScope = AtomicReference(NativeRequestScope())
+
+internal fun cancelPendingPlaybackReports() {
+    // Swap first so a newly authenticated session never inherits a cancelled scope. Any report
+    // racing logout either retains the cancelled old scope or fails its validated-session gate.
+    playbackReportRequestScope.getAndSet(NativeRequestScope()).cancel()
+    playbackReportDispatcher.cancelAll()
+}
 
 data class ServerInfo(val name: String, val version: String)
-data class QuickConnectTicket(val secret: String, val code: String)
+data class QuickConnectTicket(val secret: String, val code: String) {
+    override fun toString(): String = "QuickConnectTicket(secret=[REDACTED], code=[REDACTED])"
+}
+
+data class QuickConnectStatus(val authenticated: Boolean)
 
 private data class ParsedItemPage(
     val items: List<MediaItem>,
@@ -164,6 +179,19 @@ class JellyfinNativeApi(private val context: Context) {
         }
     }
 
+    fun getQuickConnectStatus(server: String, secret: String): QuickConnectStatus {
+        require(secret.isNotBlank()) { "Quick Connect secret is required" }
+        val endpoint = JellyfinServerUrl.normalize(server) + "/QuickConnect/Connect?Secret=" + encode(secret)
+        val result = JSONObject(request(endpoint))
+        val authenticated = result.opt("Authenticated")
+        check(authenticated is Boolean) { "Quick Connect status response was incomplete" }
+        val returnedSecret = result.optString("Secret")
+        check(returnedSecret.isBlank() || returnedSecret == secret) {
+            "Quick Connect status belonged to another request"
+        }
+        return QuickConnectStatus(authenticated)
+    }
+
     fun validateSession(session: NativeSession): NativeSession {
         val user = JSONObject(request(session.serverUrl + "/Users/" + encode(session.userId), token = session.token))
         return session.copy(
@@ -182,8 +210,11 @@ class JellyfinNativeApi(private val context: Context) {
             Triple("Recently added", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Movie,Series&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=24&Fields=" + fields, MediaCardPresentation.POSTER)
         )
         requests.forEach { (title, endpoint, presentation) ->
+            if (!AuthSessionCoordinator.isValidated(session)) return
             runCatching { parseItems(request(endpoint, token = session.token)) }.onSuccess { items ->
-                if (items.isNotEmpty()) onShelf(MediaShelf(title, items, presentation))
+                if (AuthSessionCoordinator.isValidated(session) && items.isNotEmpty()) {
+                    onShelf(MediaShelf(title, items, presentation))
+                }
             }
         }
     }
@@ -413,8 +444,13 @@ class JellyfinNativeApi(private val context: Context) {
         parseItems(request(session.serverUrl + "/Users/" + encode(session.userId) + "/Views", token = session.token))
 
     fun findLibraryId(session: NativeSession, name: String): String? {
-        val libraries = loadLibraries(session)
-        return libraries.find { it.title.equals(name, ignoreCase = true) }?.id
+        // A title is only an alias for one current, user-visible Jellyfin view. A duplicate
+        // title cannot safely identify which library owns a scoped query.
+        return loadLibraries(session)
+            .filter { it.title.equals(name, ignoreCase = true) }
+            .singleOrNull()
+            ?.id
+            ?.takeIf(String::isNotBlank)
     }
 
     fun fetchItems(session: NativeSession, params: Map<String, String>): List<MediaItem> {
@@ -792,6 +828,9 @@ class JellyfinNativeApi(private val context: Context) {
             playSessionId,
             PlaybackReportKind.PLAYING
         ) {
+            if (!AuthSessionCoordinator.isValidated(session)) {
+                throw PlaybackReportCancelledException()
+            }
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
             request(session.serverUrl + "/Sessions/Playing", method = "POST", body = payload.toString(), token = session.token)
         }
@@ -804,6 +843,9 @@ class JellyfinNativeApi(private val context: Context) {
             playSessionId,
             PlaybackReportKind.PROGRESS
         ) {
+            if (!AuthSessionCoordinator.isValidated(session)) {
+                throw PlaybackReportCancelledException()
+            }
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks); put("IsPaused", isPaused) }
             request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token)
         }
@@ -826,6 +868,11 @@ class JellyfinNativeApi(private val context: Context) {
             val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
             var lastFailure: Throwable? = null
             repeat(2) {
+                // Authorization is rechecked for each attempt so logout between the initial
+                // failure and retry cannot start a second request with the cleared token.
+                if (!AuthSessionCoordinator.isValidated(session)) {
+                    throw PlaybackReportCancelledException()
+                }
                 val result = runCatching {
                     request(
                         session.serverUrl + "/Sessions/Playing/Stopped",
@@ -849,18 +896,25 @@ class JellyfinNativeApi(private val context: Context) {
         onComplete: (Boolean) -> Unit = {},
         send: () -> Unit
     ) {
+        if (!AuthSessionCoordinator.isValidated(session)) {
+            onComplete(false)
+            return
+        }
+        val reportRequestScope = playbackReportRequestScope.get()
         playbackReportDispatcher.enqueue(
             sessionKey = listOf(
                 session.serverUrl,
                 session.userId
             ).joinToString("\u0000"),
             kind = kind,
-            send = send,
+            send = { withRequestScope(reportRequestScope) { send() } },
+            canSend = { AuthSessionCoordinator.isValidated(session) },
             onComplete = onComplete
         )
     }
 
     fun reportStoppedNow(session: NativeSession, itemId: String, playSessionId: String, positionTicks: Long) {
+        if (!AuthSessionCoordinator.isValidated(session)) return
         val payload = JSONObject().apply { put("ItemId", itemId); put("PlaySessionId", playSessionId); put("PositionTicks", positionTicks) }
         request(session.serverUrl + "/Sessions/Playing/Stopped", method = "POST", body = payload.toString(), token = session.token)
     }
@@ -902,16 +956,31 @@ class JellyfinNativeApi(private val context: Context) {
             Triple("Authors", session.serverUrl + "/Users/" + user + "/Items?IncludeItemTypes=Person&MediaTypes=Book&Recursive=true&Limit=12&Fields=" + JellyfinItemFields.MUSIC, MediaCardPresentation.SQUARE)
         )
         requests.forEach { (title, endpoint, presentation) ->
+            if (!AuthSessionCoordinator.isValidated(session)) return
             runCatching { parseItems(request(endpoint, token = session.token)) }.onSuccess { items ->
-                if (items.isNotEmpty()) onShelf(MediaShelf(title, items, presentation))
+                if (AuthSessionCoordinator.isValidated(session) && items.isNotEmpty()) {
+                    onShelf(MediaShelf(title, items, presentation))
+                }
             }
         }
     }
 
     fun reportReadingProgress(session: NativeSession, itemId: String, pageIndex: Int) {
+        if (!AuthSessionCoordinator.isValidated(session)) return
+        val reportRequestScope = playbackReportRequestScope.get()
         thread {
+            if (!AuthSessionCoordinator.isValidated(session)) return@thread
             val payload = JSONObject().apply { put("ItemId", itemId); put("PositionTicks", pageIndex.toLong() * 10_000_000L) }
-            runCatching { request(session.serverUrl + "/Sessions/Playing/Progress", method = "POST", body = payload.toString(), token = session.token) }
+            runCatching {
+                withRequestScope(reportRequestScope) {
+                    request(
+                        session.serverUrl + "/Sessions/Playing/Progress",
+                        method = "POST",
+                        body = payload.toString(),
+                        token = session.token,
+                    )
+                }
+            }
         }
     }
 
@@ -978,7 +1047,7 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun loadPageBytes(session: NativeSession, bookId: String, pageIndex: Int): ByteArray {
         var bytes = ByteArray(0)
-        transport.download(getPageImageUrl(session, bookId, pageIndex), session.token, requestScope.get()) { input ->
+        authenticatedDownload(session, getPageImageUrl(session, bookId, pageIndex)) { input ->
             bytes = input.readBytes()
         }
         return bytes
@@ -986,15 +1055,35 @@ class JellyfinNativeApi(private val context: Context) {
 
     fun downloadFile(session: NativeSession, itemId: String, action: (java.io.InputStream) -> Unit) {
         val endpoint = session.serverUrl + "/Items/" + encode(itemId) + "/Download"
-        transport.download(endpoint, session.token, requestScope.get(), action)
+        authenticatedDownload(session, endpoint, action)
     }
 
     fun probeImage(session: NativeSession, item: MediaItem, presentation: MediaCardPresentation): Boolean {
         var read = -1
-        transport.download(imageUrl(session, item, presentation), session.token, requestScope.get()) { input ->
+        authenticatedDownload(session, imageUrl(session, item, presentation)) { input ->
             read = input.read(ByteArray(1024))
         }
         return read > 0
+    }
+
+    private fun authenticatedDownload(
+        session: NativeSession,
+        endpoint: String,
+        action: (java.io.InputStream) -> Unit,
+    ) {
+        val authenticationTicket =
+            AuthSessionCoordinator.authenticatedRequestTicket(session.token)
+        transport.download(
+            endpoint = endpoint,
+            token = session.token,
+            requestScope = requestScope.get(),
+            onHttpFailure = { statusCode ->
+                if (statusCode == 401) {
+                    AuthSessionCoordinator.notifyAuthenticationRejected(authenticationTicket)
+                }
+            },
+            action = action,
+        )
     }
 
     private fun authenticate(server: String, payload: JSONObject, path: String, fallbackName: String): NativeSession {
@@ -1142,12 +1231,16 @@ class JellyfinNativeApi(private val context: Context) {
     }
 
     private fun request(endpoint: String, method: String = "GET", body: String? = null, token: String? = null): String {
+        val authenticationTicket = AuthSessionCoordinator.authenticatedRequestTicket(token)
         return try {
             val response = transport.execute(endpoint, method, body, token, requestScope.get())
             lastApiError = null
             lastSuccessAt = System.currentTimeMillis()
             response
         } catch (error: Throwable) {
+            if ((error as? HttpRequestFailure)?.statusCode == 401) {
+                AuthSessionCoordinator.notifyAuthenticationRejected(authenticationTicket)
+            }
             lastApiError = transport.latestDiagnostic()?.summary() ?: when (error) { is HttpRequestFailure -> "HTTP " + error.statusCode else -> error::class.java.simpleName }
             latestSafeNetworkFailure = lastApiError
             latestSafeNetworkDetails = transport.latestDiagnostic()?.timingDetails()
@@ -1192,6 +1285,5 @@ class JellyfinNativeApi(private val context: Context) {
         @Volatile var latestSafeNetworkFailure: String? = null
         @Volatile var latestSafeNetworkDetails: String? = null
 
-        val playbackReportDispatcher = PlaybackReportDispatcher()
     }
 }

@@ -28,6 +28,8 @@ import com.piggie.tv.ui.rendering.TvFocusIndicator
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 
+data class MediaCardArtworkSize(val width: Int, val height: Int)
+
 class MediaCardHolder(val view: View) : RecyclerView.ViewHolder(view) {
     val image: ImageView = view.findViewById(R.id.card_image)
     val artwork: View = view.findViewById(R.id.card_artwork)
@@ -63,23 +65,29 @@ object MediaCardFactory {
         }
     }
 
-    fun createView(parent: ViewGroup, presentation: MediaCardPresentation): View {
+    fun createView(
+        parent: ViewGroup,
+        presentation: MediaCardPresentation,
+        premiumMaterial: Boolean = false,
+        browseTitle: Boolean = false,
+        artworkSize: MediaCardArtworkSize? = null
+    ): View {
         val context = parent.context
         val features = TvRenderingRuntime.features()
-        val size = when (presentation) {
+        val size = artworkSize?.let { it.width to it.height } ?: when (presentation) {
             MediaCardPresentation.POSTER -> context.dim(R.dimen.tv_poster_width) to context.dim(R.dimen.tv_poster_height)
             MediaCardPresentation.LANDSCAPE -> context.dim(R.dimen.tv_landscape_width) to context.dim(R.dimen.tv_landscape_height)
             MediaCardPresentation.SQUARE -> context.dim(R.dimen.tv_square_width) to context.dim(R.dimen.tv_square_height)
         }
 
-        val card = LinearLayout(context).apply {
+        val card = (if (browseTitle) BrowseMediaCardView(context) else LinearLayout(context)).apply {
             orientation = LinearLayout.VERTICAL
             isFocusable = true
             isFocusableInTouchMode = true
-            PTVShapes.applyMediaCardSurface(this)
+            PTVShapes.applyMediaCardSurface(this, premiumMaterial)
             // AFTKM keeps the accepted fixed-width geometry: the safe static ice surface is
             // applied directly to the root, without restoring the old outer card padding.
-            val padding = if (features.flatRectangularCards) 0 else context.dim(R.dimen.tv_card_padding)
+            val padding = if (features.flatRectangularCards || artworkSize != null) 0 else context.dim(R.dimen.tv_card_padding)
             setPadding(padding, padding, padding, padding)
 
             setOnFocusChangeListener { v, focused ->
@@ -120,7 +128,7 @@ object MediaCardFactory {
         card.addView(cardWithBadge, LinearLayout.LayoutParams(size.first, size.second))
         // The one cached RecyclerView overlay now follows the entire ice-card body, including
         // title, metadata and progress, while retaining scale=1/elevation=0.
-        TvFocusIndicator.registerArtwork(card, card)
+        TvFocusIndicator.registerArtwork(card, card, premiumFocus = premiumMaterial)
 
         val title = TextView(context).apply {
             id = R.id.card_title
@@ -175,6 +183,10 @@ object MediaCardFactory {
         }
         card.addView(progress, LinearLayout.LayoutParams(size.first, context.dim(R.dimen.tv_spacing_small)))
 
+        if (card is BrowseMediaCardView) {
+            card.titleTreatment = BrowseCardTitleTreatment(card, title, metaLayout)
+        }
+
         return card
     }
 
@@ -194,10 +206,12 @@ object MediaCardFactory {
         holder.image.tag = item.id
         if (item.type == "ViewMore") {
             bindViewMore(holder, item)
+            (holder.view as? BrowseMediaCardView)?.titleTreatment?.setFocused(holder.view.hasFocus())
             return
         }
 
         holder.title.text = item.title
+        (holder.view as? BrowseMediaCardView)?.titleTreatment?.setFocused(holder.view.hasFocus())
 
         val subtitle = when (item.type) {
             "Episode" -> item.seriesName ?: ""
@@ -232,8 +246,16 @@ object MediaCardFactory {
             MediaCardPresentation.SQUARE -> holder.itemView.context.dim(R.dimen.tv_square_width) to holder.itemView.context.dim(R.dimen.tv_square_height)
         }
 
-        val targetWidth = regularSize.first.coerceAtLeast(1)
-        val targetHeight = regularSize.second.coerceAtLeast(1)
+        val targetWidth = resolvePositiveDimension(
+            configured = holder.artwork.layoutParams.width.takeIf { it > 0 } ?: regularSize.first,
+            fallback = holder.image.width.takeIf { it > 0 } ?: holder.artwork.width.takeIf { it > 0 } ?: holder.view.width.takeIf { it > 0 },
+            minimum = 1
+        )
+        val targetHeight = resolvePositiveDimension(
+            configured = holder.artwork.layoutParams.height.takeIf { it > 0 } ?: regularSize.second,
+            fallback = holder.image.height.takeIf { it > 0 } ?: holder.artwork.height.takeIf { it > 0 } ?: holder.view.height.takeIf { it > 0 },
+            minimum = 1
+        )
 
         val progressFraction = com.piggie.tv.data.playback.PlaybackProgress.fraction(item.playbackPositionTicks, item.runtimeTicks)
         holder.progress?.let {
@@ -255,7 +277,9 @@ object MediaCardFactory {
             crossfade(false)
             placeholder(holder.placeholder)
             error(holder.placeholder)
-            size(targetWidth, targetHeight)
+            if (targetWidth > 0 && targetHeight > 0) {
+                size(targetWidth, targetHeight)
+            }
             setParameter(
                 PtvCoilEventListenerFactory.CATEGORY_PARAMETER,
                 PtvCoilEventListenerFactory.CATEGORY_CARD,
@@ -287,6 +311,7 @@ object MediaCardFactory {
      * shader or drawable inflation on the hot focus/bind path.
      */
     private fun resetBoundState(holder: MediaCardHolder) {
+        (holder.view as? BrowseMediaCardView)?.titleTreatment?.clearOverlay()
         holder.image.dispose()
 
         holder.view.clearAnimation()
@@ -354,6 +379,18 @@ object MediaCardFactory {
         PTVShapes.applyFocusEffect(holder.view, false)
         holder.view.clearFocus()
         resetBoundState(holder)
+    }
+
+    private fun resolvePositiveDimension(configured: Int, fallback: Int?, minimum: Int): Int {
+        if (configured > 0) {
+            return configured
+        }
+        fallback?.let { value ->
+            if (value > 0) {
+                return value
+            }
+        }
+        return minimum
     }
 
     private fun contextArtworkDescription(title: String): String = "$title artwork"

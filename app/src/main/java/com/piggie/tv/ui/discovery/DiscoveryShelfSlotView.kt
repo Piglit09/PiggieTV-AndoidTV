@@ -21,15 +21,16 @@ import com.piggie.tv.util.setTextSizeRes
 /** A stable manifest slot. Failed shelves remain visible and retryable instead of disappearing. */
 class DiscoveryShelfSlotView(
     context: Context,
-    private val definition: ShelfDefinition
+    private val definition: ShelfDefinition,
+    private val openRowSurface: Boolean = false
 ) : LinearLayout(context) {
 
     init {
         setTag(R.id.discovery_shelf_id, definition.id)
         orientation = VERTICAL
-        // One resource-backed drawable groups the title and every shelf state. Its alpha lives in
-        // the fill color, so the child hierarchy remains fully opaque and avoids nested layers.
-        if (TvRenderingRuntime.features().shelfGlassEnabled) {
+        // Home's Glass 0 row exposes the cinematic backdrop. Other discovery routes retain
+        // their established tray and all shelf states keep the same stable view holder.
+        if (!openRowSurface && TvRenderingRuntime.features().shelfGlassEnabled) {
             setBackgroundResource(R.drawable.tv_glass_shelf)
         }
         showLoading()

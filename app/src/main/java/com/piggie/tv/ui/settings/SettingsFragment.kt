@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.content.Intent
 import android.view.Gravity
@@ -21,10 +22,10 @@ import coil.Coil
 import coil.annotation.ExperimentalCoilApi
 import com.piggie.tv.BuildConfig
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.discovery.DiscoveryManager
-import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.playback.ConnectionSpeed
 import com.piggie.tv.data.session.NativeSettings
@@ -35,8 +36,8 @@ import com.piggie.tv.diagnostics.PtvDiagnosticExporter
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvTestResult
 import com.piggie.tv.diagnostics.PtvTestRunner
+import com.piggie.tv.navigation.NativeRoute
 import com.piggie.tv.theme.PTVShapes
-import com.piggie.tv.ui.player.MediaDetailsSeedStore
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.widgets.PtvSelectionDialog
 import com.piggie.tv.updates.ReleaseCheckResult
@@ -54,9 +55,25 @@ class SettingsFragment : Fragment() {
     private val releaseUpdateManager by lazy { ReleaseUpdateManager(requireContext()) }
     private lateinit var session: NativeSession
     private lateinit var root: FrameLayout
+    private var firstControl: View? = null
+
+    fun firstControlForNavigation(): View? = firstControl?.takeIf { it.parent != null }
+
+    override fun onDestroyView() {
+        firstControl = null
+        super.onDestroyView()
+    }
+
+    private fun settingsScroll(context: Context): ScrollView = ScrollView(context).apply {
+        isFillViewport = true
+        isSmoothScrollingEnabled = false
+        clipToPadding = true
+        setPadding(0, context.dim(R.dimen.tv_floating_nav_clearance), 0, 0)
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        session = (activity as? PtvHostActivity)?.session ?: store.read()!!
+        session = (activity as? PtvHostActivity)?.session
+            ?: requireNotNull(AuthSessionCoordinator.validatedSession(store))
         root = FrameLayout(requireContext())
         showSettings()
         return root
@@ -64,11 +81,15 @@ class SettingsFragment : Fragment() {
 
     private fun showSettings(focusConnectionSpeed: Boolean = false) {
         val context = requireContext()
-        val scroll = ScrollView(context).apply { isFillViewport = true }
-        scroll.isSmoothScrollingEnabled = false
+        val scroll = settingsScroll(context)
         val page = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_medium), context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_large))
+            setPadding(
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_medium),
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_large)
+            )
         }
         scroll.addView(
             page,
@@ -82,67 +103,118 @@ class SettingsFragment : Fragment() {
         page.addView(label("Settings", context.sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true))
         page.addView(label("v${BuildConfig.VERSION_NAME}  •  ${session.userName}", context.sp(R.dimen.tv_text_size_body), R.color.tv_text_secondary, margin = 8))
         
+        val profileEntry = profileEntry(page)
+
         val connectionSpeedButton = settingsButton(
             page,
-            "Connection Speed: ${ConnectionSpeed.fromStored(settings.connectionSpeed).displayLabel}"
-        ) {
-            showConnectionSpeedSelection()
-        }
-        settingsButton(page, "Autoplay Next Episode: ${if (settings.autoplayNextEpisode) "On" else "Off"}") {
-            settings.autoplayNextEpisode = !settings.autoplayNextEpisode
-            showSettings()
-        }
-        settingsButton(page, "Subtitles: ${settings.subtitlePreference}") {
-            cycleSubtitles()
-            showSettings()
-        }
+            "Connection Speed: ${ConnectionSpeed.fromStored(settings.connectionSpeed).displayLabel}",
+            ::showConnectionSpeedSelection
+        )
+        settingsButton(page, "Autoplay Next Episode: ${if (settings.autoplayNextEpisode) "On" else "Off"}", ::toggleAutoplayNextEpisode)
+        settingsButton(page, "Subtitles: ${settings.subtitlePreference}", ::advanceSubtitlePreference)
         val betaLabel = when {
             session.isAdministrator -> "On (admin)"
             settings.notifyBetaReleases -> "On"
             else -> "Off"
         }
-        settingsButton(page, "Beta release alerts: $betaLabel") {
-            if (!session.isAdministrator) {
-                settings.notifyBetaReleases = !settings.notifyBetaReleases
-                showSettings()
-            }
-        }
-        settingsButton(page, "Check for app updates") {
-            Toast.makeText(context, "Checking for updates...", Toast.LENGTH_SHORT).show()
-            releaseUpdateManager.checkForUpdates(
-                session,
-                force = true
-            ) { result ->
-                val message = when (result) {
-                    is ReleaseCheckResult.Available -> "New release: ${result.release.displayName}"
-                    is ReleaseCheckResult.UpToDate -> result.message
-                    is ReleaseCheckResult.Skipped -> result.message
-                    is ReleaseCheckResult.Error -> "Update check failed: ${result.message.ifBlank { "No details available" }}"
-                }
-                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-            }
-        }
-        settingsButton(page, "Clear Image Cache") {
-            Coil.imageLoader(requireContext()).memoryCache?.clear()
-            Coil.imageLoader(requireContext()).diskCache?.clear()
-            Toast.makeText(context, "Cache cleared", Toast.LENGTH_SHORT).show()
-        }
-        settingsButton(page, "Diagnostics \u0026 Beta Info") {
-            showDiagnostics()
-        }
-        settingsButton(page, "Sign Out") {
-            MusicPlaybackManager.shutdown()
-            DiscoveryManager.clearForLogout()
-            MediaDetailsSeedStore.clear()
-            store.clear()
-            activity?.finish()
-        }
+        settingsButton(page, "Beta release alerts: $betaLabel", ::toggleBetaReleaseAlerts)
+        settingsButton(page, "Check for app updates", context, ::checkForAppUpdates)
+        settingsButton(page, "Clear Image Cache", context, ::clearImageCache)
+        settingsButton(page, "Diagnostics \u0026 Beta Info", ::showDiagnostics)
+        settingsButton(page, "Sign Out", ::signOut)
         
         root.removeAllViews()
         root.addView(scroll)
+        firstControl = profileEntry
+        (activity as? PtvHostActivity)?.updateSettingsFirstControl(profileEntry)
         if (focusConnectionSpeed) {
             connectionSpeedButton.post { connectionSpeedButton.requestFocus() }
         }
+    }
+
+    private fun profileEntry(page: LinearLayout): View {
+        val context = requireContext()
+        val avatarSize = context.dim(R.dimen.tv_nav_button_height)
+        val entry = LinearLayout(context).apply {
+            id = R.id.ptv_settings_profile_entry
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            isFocusable = true
+            isClickable = true
+            contentDescription = "Profile, ${session.userName}"
+            setBackgroundResource(R.drawable.tv_button_secondary)
+            setPadding(context.dim(R.dimen.tv_spacing_medium), 0, context.dim(R.dimen.tv_spacing_medium), 0)
+            setOnClickListener { (activity as? PtvHostActivity)?.showRoute(NativeRoute.PROFILE) }
+            setOnFocusChangeListener { view, focused -> PTVShapes.applyFocusEffect(view, focused) }
+        }
+        entry.addView(TextView(context).apply {
+            text = session.userName.trim().take(1).uppercase().ifBlank { "P" }
+            gravity = Gravity.CENTER
+            setTextSizeRes(R.dimen.tv_text_size_body)
+            setTextColor(context.getColor(R.color.tv_text_primary))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(context.getColor(R.color.tv_button))
+            }
+        }, LinearLayout.LayoutParams(avatarSize, avatarSize))
+        entry.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label("Profile", context.sp(R.dimen.tv_text_size_body), R.color.tv_text_primary, true))
+            addView(label(session.userName, context.sp(R.dimen.tv_text_size_metadata), R.color.tv_text_secondary))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = context.dim(R.dimen.tv_spacing_medium)
+        })
+        page.addView(
+            entry,
+            LinearLayout.LayoutParams(-1, avatarSize + context.dim(R.dimen.tv_spacing_medium)).apply {
+                topMargin = context.dim(R.dimen.tv_spacing_medium)
+            }
+        )
+        return entry
+    }
+
+    private fun toggleAutoplayNextEpisode() {
+        settings.autoplayNextEpisode = !settings.autoplayNextEpisode
+        showSettings()
+    }
+
+    private fun advanceSubtitlePreference() {
+        cycleSubtitles()
+        showSettings()
+    }
+
+    private fun toggleBetaReleaseAlerts() {
+        if (!session.isAdministrator) {
+            settings.notifyBetaReleases = !settings.notifyBetaReleases
+            showSettings()
+        }
+    }
+
+    private fun checkForAppUpdates(context: Context) {
+        Toast.makeText(context, "Checking for updates...", Toast.LENGTH_SHORT).show()
+        releaseUpdateManager.checkForUpdates(
+            session,
+            force = true
+        ) { result ->
+            val message = when (result) {
+                is ReleaseCheckResult.Available -> "New release: ${result.release.displayName}"
+                is ReleaseCheckResult.UpToDate -> result.message
+                is ReleaseCheckResult.Skipped -> result.message
+                is ReleaseCheckResult.Error -> "Update check failed: ${result.message.ifBlank { "No details available" }}"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun clearImageCache(context: Context) {
+        Coil.imageLoader(requireContext()).memoryCache?.clear()
+        Coil.imageLoader(requireContext()).diskCache?.clear()
+        Toast.makeText(context, "Cache cleared", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun signOut() {
+        (activity as? PtvHostActivity)?.signOut()
     }
 
     private fun showConnectionSpeedSelection() {
@@ -178,11 +250,15 @@ class SettingsFragment : Fragment() {
         val device = PtvDeviceSnapshot.capture(context)
         val rendering = TvRenderingRuntime.capabilitySnapshot()
 
-        val scroll = ScrollView(context).apply { isFillViewport = true }
-        scroll.isSmoothScrollingEnabled = false
+        val scroll = settingsScroll(context)
         val page = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_medium), context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_large))
+            setPadding(
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_medium),
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_large)
+            )
         }
         scroll.addView(page)
 
@@ -324,16 +400,22 @@ class SettingsFragment : Fragment() {
         
         root.removeAllViews()
         root.addView(scroll)
+        firstControl = toggleDiagnostics
+        (activity as? PtvHostActivity)?.updateSettingsFirstControl(toggleDiagnostics)
         toggleDiagnostics.requestFocus()
     }
 
     private fun showTestRunner(results: List<PtvTestResult>? = null) {
         val context = requireContext()
-        val scroll = ScrollView(context).apply { isFillViewport = true }
-        scroll.isSmoothScrollingEnabled = false
+        val scroll = settingsScroll(context)
         val page = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_medium), context.dim(R.dimen.tv_spacing_large), context.dim(R.dimen.tv_spacing_large))
+            setPadding(
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_medium),
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_large)
+            )
         }
         scroll.addView(page)
         page.addView(label("Diagnostics Test Runner", context.sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true))
@@ -349,8 +431,13 @@ class SettingsFragment : Fragment() {
         settingsButton(page, "Back to Diagnostics") { showDiagnostics() }
         root.removeAllViews()
         root.addView(scroll)
+        firstControl = run
+        (activity as? PtvHostActivity)?.updateSettingsFirstControl(run)
         run.requestFocus()
     }
+
+    private fun settingsButton(page: LinearLayout, title: String, actionContext: Context, action: (Context) -> Unit): Button =
+        settingsButton(page, title) { action(actionContext) }
 
     private fun settingsButton(page: LinearLayout, title: String, action: () -> Unit): Button {
         val context = requireContext()

@@ -21,6 +21,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.reader.ReaderDocument
@@ -72,7 +73,7 @@ class ReaderActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        session = store.read() ?: run { finish(); return }
+        session = AuthSessionCoordinator.validatedSession(store) ?: run { finish(); return }
         item = parseIntentItem() ?: run { finish(); return }
         PtvDiagnosticsManager.routeRequested("reader")
         PtvDiagnosticsManager.recordReader(PtvReaderTrace(itemId = item.id, event = "open_requested"))

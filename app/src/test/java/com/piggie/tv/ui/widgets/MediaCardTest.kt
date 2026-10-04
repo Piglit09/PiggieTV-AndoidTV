@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.view.View
 import android.widget.FrameLayout
@@ -108,6 +109,34 @@ class MediaCardTest {
         assertEquals(0f, card.translationZ)
         assertEquals(1f, card.alpha)
         assertNull(card.animation)
+    }
+
+    @Test
+    fun premiumCardFocusIsOptInSoMusicAndBrowseKeepTheEstablishedBorder() {
+        val legacyCard = MediaCardFactory.createView(parent, MediaCardPresentation.SQUARE)
+        val homeCard = MediaCardFactory.createView(parent, MediaCardPresentation.SQUARE, premiumMaterial = true)
+
+        assertTrue(!TvFocusIndicator.isPremiumFocus(legacyCard))
+        assertTrue(TvFocusIndicator.isPremiumFocus(homeCard))
+    }
+
+    @Test
+    fun premiumCardKeepsMetadataReadableWithLessPermanentChrome() {
+        val card = MediaCardFactory.createView(parent, MediaCardPresentation.POSTER, premiumMaterial = true)
+        val surface = card.background
+        assertTrue("premium cards should react to focus without covering artwork", surface is StateListDrawable)
+        val states = surface as StateListDrawable
+        states.state = intArrayOf()
+        val resting = (states.current as LayerDrawable).getDrawable(0) as GradientDrawable
+        val restingAlpha = Color.alpha(requireNotNull(resting.color).defaultColor)
+        states.state = intArrayOf(android.R.attr.state_focused)
+        val focused = (states.current as LayerDrawable).getDrawable(0) as GradientDrawable
+        val focusedAlpha = Color.alpha(requireNotNull(focused.color).defaultColor)
+
+        assertTrue("resting footer should be lighter", restingAlpha <= 90)
+        assertTrue("focus should strengthen the information surface", focusedAlpha >= restingAlpha + 30)
+        assertNotNull(card.findViewById<TextView>(R.id.card_title))
+        assertNotNull(card.findViewById<ProgressBar>(R.id.card_progress))
     }
 
     @Test

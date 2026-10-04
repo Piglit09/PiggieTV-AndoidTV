@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.piggie.tv.BuildConfig
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.NativeSettings
+import com.piggie.tv.util.LocalFixtureNetworkGuard
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -43,7 +44,11 @@ sealed interface ReleaseCheckResult {
 
 class ReleaseUpdateManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("ptv_release_updates", Context.MODE_PRIVATE)
-    private val httpClient = OkHttpClient.Builder().build()
+    private val httpClient = OkHttpClient.Builder()
+        .addInterceptor(LocalFixtureNetworkGuard)
+        .followRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+        .followSslRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+        .build()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val settingsProvider by lazy { NativeSettings(context) }
 
@@ -52,6 +57,10 @@ class ReleaseUpdateManager(private val context: Context) {
         force: Boolean = false,
         onResult: ((ReleaseCheckResult) -> Unit)? = null
     ) {
+        if (BuildConfig.LOCAL_FIXTURE_ONLY) {
+            postResult(ReleaseCheckResult.Skipped("Local fixture does not check for releases"), onResult)
+            return
+        }
         if (!force) {
             val lastChecked = prefs.getLong(KEY_LAST_CHECK_MS, 0L)
             val now = System.currentTimeMillis()

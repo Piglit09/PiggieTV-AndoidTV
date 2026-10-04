@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.NativeSession
@@ -21,6 +22,8 @@ import com.piggie.tv.data.playback.PlaybackOriginPolicy
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.diagnostics.PtvAudioTrace
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
+import com.piggie.tv.BuildConfig
+import com.piggie.tv.util.LocalFixtureNetworkGuard
 
 private const val AUDIO_MEDIA_SESSION_ID = "ptv-audio-session"
 
@@ -40,13 +43,16 @@ class AudioPlayerService : MediaSessionService() {
         PtvDiagnosticsManager.recordAudio(PtvAudioTrace(event = "service_created", serviceState = "created"))
         
         val client = okhttp3.OkHttpClient.Builder()
+            .addInterceptor(LocalFixtureNetworkGuard)
+            .followRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+            .followSslRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
             .addNetworkInterceptor { chain ->
                 val original = chain.request()
                 val requestBuilder = original.newBuilder()
                     .removeHeader("Authorization")
                     .removeHeader("X-Emby-Authorization")
                     .removeHeader("X-MediaBrowser-Token")
-                val session = store.read()
+                val session = AuthSessionCoordinator.validatedSession(store)
                 if (
                     session != null &&
                     PlaybackOriginPolicy.shouldAttachCredentials(
@@ -220,7 +226,7 @@ class AudioPlayerService : MediaSessionService() {
         events.forEach { event ->
             when (event) {
                 is MusicPlaybackReportEvent.Playing -> {
-                    val session = store.read() ?: return@forEach
+                    val session = AuthSessionCoordinator.validatedSession(store) ?: return@forEach
                     reportingSession = session
                     api.reportPlaying(
                         session,
@@ -230,7 +236,7 @@ class AudioPlayerService : MediaSessionService() {
                     )
                 }
                 is MusicPlaybackReportEvent.Progress -> {
-                    val session = reportingSession ?: store.read() ?: return@forEach
+                    val session = validatedReportingSession() ?: return@forEach
                     reportingSession = session
                     api.reportProgress(
                         session,
@@ -241,7 +247,7 @@ class AudioPlayerService : MediaSessionService() {
                     )
                 }
                 is MusicPlaybackReportEvent.Stopped -> {
-                    val session = reportingSession ?: store.read()
+                    val session = validatedReportingSession()
                     if (session != null) {
                         api.reportStopped(
                             session,
@@ -254,6 +260,13 @@ class AudioPlayerService : MediaSessionService() {
                 }
             }
         }
+    }
+
+    private fun validatedReportingSession(): NativeSession? {
+        val cached = reportingSession?.takeIf(AuthSessionCoordinator::isValidated)
+        val validated = cached ?: AuthSessionCoordinator.validatedSession(store)
+        if (validated == null) reportingSession = null
+        return validated
     }
 
     private fun startReporting() {

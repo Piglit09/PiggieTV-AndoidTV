@@ -13,8 +13,10 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
+import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.models.*
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.theme.PTVColors
@@ -39,9 +41,11 @@ class ReadingFragment : Fragment() {
     private lateinit var backdropOverlay: View
     private lateinit var pageContent: LinearLayout
     private var loading = false
+    private var activeRequestScope: NativeRequestScope? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        session = (activity as? PtvHostActivity)?.session ?: store.read()!!
+        session = (activity as? PtvHostActivity)?.session
+            ?: requireNotNull(AuthSessionCoordinator.validatedSession(store))
         
         root = FrameLayout(requireContext()).apply {
             setBackgroundColor(PTVColors.background)
@@ -90,6 +94,8 @@ class ReadingFragment : Fragment() {
     private fun loadReading() {
         if (loading) return
         loading = true
+        activeRequestScope?.cancel()
+        val requestScope = NativeRequestScope().also { activeRequestScope = it }
 
         val context = requireContext()
         val titleLabel = label("Reading", context.sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true, margin = 20, leftPadding = context.dim(R.dimen.tv_screen_margin_horizontal))
@@ -100,16 +106,31 @@ class ReadingFragment : Fragment() {
 
         thread(start = true) {
             runCatching {
-                api.loadReadingHomeIncrementally(session) { shelf ->
-                    activity?.runOnUiThread {
-                        loadingLabel.visibility = View.GONE
-                        addShelf(pageContent, shelf)
+                api.withRequestScope(requestScope) {
+                    api.loadReadingHomeIncrementally(session) { shelf ->
+                        if (
+                            requestScope.isCancelled ||
+                            !AuthSessionCoordinator.isValidated(session)
+                        ) {
+                            return@loadReadingHomeIncrementally
+                        }
+                        activity?.runOnUiThread {
+                            if (!canApplyLoad(requestScope)) return@runOnUiThread
+                            loadingLabel.visibility = View.GONE
+                            addShelf(pageContent, shelf)
+                        }
                     }
                 }
             }.onSuccess {
-                activity?.runOnUiThread { loading = false }
-            }.onFailure { error ->
                 activity?.runOnUiThread {
+                    if (!canApplyLoad(requestScope)) return@runOnUiThread
+                    activeRequestScope = null
+                    loading = false
+                }
+            }.onFailure {
+                activity?.runOnUiThread {
+                    if (!canApplyLoad(requestScope)) return@runOnUiThread
+                    activeRequestScope = null
                     loading = false
                     pageContent.removeAllViews()
                     val errorView = LinearLayout(requireContext()).apply {
@@ -122,7 +143,7 @@ class ReadingFragment : Fragment() {
                             setTextColor(requireContext().getColor(R.color.tv_text_primary))
                         })
                         addView(TextView(context).apply {
-                            text = error.message ?: "Failed to connect to reading library"
+                            text = "Failed to connect to reading library"
                             textSize = 16f
                             setTextColor(requireContext().getColor(R.color.tv_text_secondary))
                             setPadding(0, 20, 0, 0)
@@ -141,6 +162,20 @@ class ReadingFragment : Fragment() {
                 }
             }
         }
+    }
+
+    private fun canApplyLoad(requestScope: NativeRequestScope): Boolean =
+        activeRequestScope === requestScope &&
+            !requestScope.isCancelled &&
+            isAdded &&
+            view != null &&
+            AuthSessionCoordinator.isValidated(session)
+
+    override fun onDestroyView() {
+        activeRequestScope?.cancel()
+        activeRequestScope = null
+        loading = false
+        super.onDestroyView()
     }
 
     private fun addShelf(parent: LinearLayout, shelf: MediaShelf) {

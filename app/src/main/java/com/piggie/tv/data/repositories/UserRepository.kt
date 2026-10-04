@@ -1,17 +1,16 @@
 package com.piggie.tv.data.repositories
 
+import com.piggie.tv.auth.AuthLogout
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
-import com.piggie.tv.data.discovery.DiscoveryManager
-import com.piggie.tv.data.playback.MusicPlaybackManager
-import com.piggie.tv.ui.player.MediaDetailsSeedStore
 
 class UserRepository(
     private val api: JellyfinNativeApi,
     private val store: SecureSessionStore
 ) {
-    fun getCurrentSession(): NativeSession? = store.read()
+    fun getCurrentSession(): NativeSession? = AuthSessionCoordinator.validatedSession(store)
 
     fun validateAndRefresh(session: NativeSession): NativeSession {
         val updated = api.validateSession(session)
@@ -19,10 +18,5 @@ class UserRepository(
         return updated
     }
 
-    fun signOut() {
-        MusicPlaybackManager.shutdown()
-        store.clear()
-        DiscoveryManager.clearForLogout()
-        MediaDetailsSeedStore.clear()
-    }
+    fun signOut(): Boolean = AuthLogout.clearLocalAuthentication(store, api::cancelInFlightRequests)
 }

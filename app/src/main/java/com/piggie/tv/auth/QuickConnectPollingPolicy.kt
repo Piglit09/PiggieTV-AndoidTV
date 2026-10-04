@@ -5,6 +5,8 @@ enum class QuickConnectPollOutcome { WAITING, EXPIRED, FAILED }
 object QuickConnectPollingPolicy {
     const val POLL_INTERVAL_MS = 2_000L
     const val TIMEOUT_MS = 10 * 60 * 1_000L
+    const val MAX_CONSECUTIVE_NETWORK_FAILURES = 3
+
     fun outcomeFor(status: Int): QuickConnectPollOutcome = when (status) {
         401, 403 -> QuickConnectPollOutcome.WAITING
         404 -> QuickConnectPollOutcome.EXPIRED
@@ -13,4 +15,7 @@ object QuickConnectPollingPolicy {
 
     fun hasTimedOut(startedAtMs: Long, nowMs: Long): Boolean =
         startedAtMs > 0L && nowMs - startedAtMs >= TIMEOUT_MS
+
+    fun shouldRetryNetworkFailure(consecutiveFailures: Int): Boolean =
+        consecutiveFailures in 1..MAX_CONSECUTIVE_NETWORK_FAILURES
 }

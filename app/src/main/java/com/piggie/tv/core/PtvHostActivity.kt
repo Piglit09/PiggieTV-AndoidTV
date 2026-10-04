@@ -17,14 +17,19 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import com.piggie.tv.R
-import com.piggie.tv.auth.MainActivity
+import com.piggie.tv.auth.AuthFailurePolicy
+import com.piggie.tv.auth.AuthLogout
+import com.piggie.tv.auth.AuthenticationRejection
+import com.piggie.tv.auth.AuthSessionCoordinator
+import com.piggie.tv.auth.SessionRestoreDestination
 import com.piggie.tv.data.api.JellyfinNativeApi
-import com.piggie.tv.data.api.SessionOrigin
+import com.piggie.tv.data.api.NativeRequestScope
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.models.MediaItem
 import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.data.session.NativeSettings
 import com.piggie.tv.data.session.SecureSessionStore
+import com.piggie.tv.data.session.SessionReadResult
 import com.piggie.tv.navigation.NativePtvShell
 import com.piggie.tv.navigation.NativeRoute
 import com.piggie.tv.navigation.NativeRouteNavigator
@@ -44,36 +49,68 @@ import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PtvFocusTrace
 import com.piggie.tv.memory.MemoryPressurePolicy
 import com.piggie.tv.memory.MemoryPressureParticipant
-import kotlin.concurrent.thread
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.lang.ref.WeakReference
+import kotlin.concurrent.thread
 
 class PtvHostActivity : AppCompatActivity() {
-    private val api by lazy { JellyfinNativeApi(this) }
     private val store by lazy { SecureSessionStore(this) }
+    private val sessionApi by lazy { JellyfinNativeApi(this) }
     private val releaseUpdateManager by lazy { ReleaseUpdateManager(this) }
-    lateinit var session: NativeSession
+    private var activeSession: NativeSession? = null
+    private var completedInitialResume = false
+    private var sessionRevalidationGeneration = 0L
+    private var sessionRevalidationScope: NativeRequestScope? = null
+    private val authenticationRejectionListener: (AuthenticationRejection) -> Unit = { rejection ->
+        runOnUiThread {
+            val candidate = activeSession ?: return@runOnUiThread
+            if (
+                isFinishing ||
+                isDestroyed ||
+                !AuthSessionCoordinator.isValidated(candidate) ||
+                !AuthSessionCoordinator.rejectionMatches(rejection, candidate)
+            ) {
+                return@runOnUiThread
+            }
+            clearRejectedSession(candidate)
+        }
+    }
+    val session: NativeSession
+        get() = requireNotNull(activeSession) { "An authenticated session is required" }
     private lateinit var contentFrame: FrameLayout
+    private lateinit var navigationRail: View
     private var navigation = emptyMap<NativeRoute, Button>()
     private var currentRoute = NativeRoute.HOME
     private val routeFragments = LinkedHashMap<NativeRoute, Fragment>(ROUTE_CACHE_SIZE, 0.75f, true)
     private var visibleFragment: Fragment? = null
     private var detailsFragment: Fragment? = null
+    private var detailsItemType: String? = null
     private var focusBeforeDetails: WeakReference<View>? = null
     private var detailsTraceCookie = NO_TRACE
     private var detailsRequestedAtMs = 0L
     private val traceSequence = AtomicInteger()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        session = store.read() ?: run {
-            super.onCreate(savedInstanceState)
+        val storedSession = (store.readResult() as? SessionReadResult.Available)?.session
+        if (
+            storedSession == null ||
+            !storedSession.isComplete() ||
+            !AuthSessionCoordinator.isValidated(storedSession)
+        ) {
+            activeSession = null
+            // Discard FragmentManager restoration when authentication is unavailable. Restored
+            // fragments synchronously request the host session from super.onCreate().
+            super.onCreate(null)
             returnToLogin()
             return
         }
+        activeSession = storedSession
         // FragmentActivity restores retained fragments from super.onCreate(). They can create
         // their views synchronously and read the host session, so the session must exist first.
         super.onCreate(savedInstanceState)
+        completedInitialResume = savedInstanceState != null
+        AuthSessionCoordinator.addAuthenticationRejectionListener(authenticationRejectionListener)
 
         val requestedLaunchRoute = consumeRequestedRoute(intent)
         if (savedInstanceState != null) {
@@ -85,10 +122,15 @@ class PtvHostActivity : AppCompatActivity() {
         
         MusicPlaybackManager.init(this)
         
-        val shell = NativePtvShell.create(this, currentRoute, ::showRoute)
+        val shell = NativePtvShell.create(this, currentRoute, ::resolveContentUpExit, ::showRoute)
         contentFrame = shell.content
         navigation = shell.navigation
+        navigationRail = shell.navigationRail
         restoreCachedFragments()
+        if (detailsFragment != null) {
+            detailsItemType = savedInstanceState?.getString(DETAILS_ITEM_TYPE_STATE)
+            NativePtvShell.applyRailPresentation(navigationRail, currentRoute, detailsItemType)
+        }
         supportFragmentManager.registerFragmentLifecycleCallbacks(
             object : FragmentManager.FragmentLifecycleCallbacks() {
                 override fun onFragmentViewCreated(
@@ -114,11 +156,13 @@ class PtvHostActivity : AppCompatActivity() {
             showRoute(requestedLaunchRoute ?: currentRoute)
         } else {
             // Restore selection state for navigation buttons
-            navigation.forEach { (route, button) -> button.isSelected = route == currentRoute }
+            val selectedNavigation = NativeRouteNavigator.navigationSelection(currentRoute)
+            navigation.forEach { (route, button) -> button.isSelected = route == selectedNavigation }
+            visibleFragment?.let { linkPageAndNavigationFocus(currentRoute, it) }
         }
 
         PerformanceMonitor.setVisible(this, NativeSettings(this).diagnosticsOverlayEnabled)
-        refreshSessionForAdminAndCheckForUpdates()
+        releaseUpdateManager.checkForUpdates(session, force = false, onResult = null)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -128,23 +172,33 @@ class PtvHostActivity : AppCompatActivity() {
         requestedRoute?.let(::showRoute)
     }
 
-    private fun refreshSessionForAdminAndCheckForUpdates() {
-        thread {
-            val refreshedSession = runCatching { api.validateSession(session) }
-                .getOrElse { session }
-            if (refreshedSession.isAdministrator != session.isAdministrator) {
-                val origin = runCatching { store.origin() }.getOrDefault(SessionOrigin.STORED)
-                runCatching { store.save(refreshedSession, origin) }
-            }
-            val activeSession = refreshedSession
-            session = activeSession
-            releaseUpdateManager.checkForUpdates(activeSession, force = false, onResult = null)
+    override fun onResume() {
+        super.onResume()
+        // MainActivity has just validated the session before the first host resume. Revalidate on
+        // later foreground returns so a token revoked while the task stays alive recovers cleanly.
+        if (!completedInitialResume) {
+            completedInitialResume = true
+            return
         }
+        revalidateActiveSession()
+    }
+
+    override fun onPause() {
+        cancelSessionRevalidation()
+        super.onPause()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("current_route", currentRoute.name)
+        if (detailsFragment != null) outState.putString(DETAILS_ITEM_TYPE_STATE, detailsItemType)
+    }
+
+    override fun onDestroy() {
+        cancelSessionRevalidation()
+        AuthSessionCoordinator.removeAuthenticationRejectionListener(authenticationRejectionListener)
+        super.onDestroy()
+        activeSession = null
     }
 
     override fun onTrimMemory(level: Int) {
@@ -202,9 +256,10 @@ class PtvHostActivity : AppCompatActivity() {
 
     private fun handleBack(): Boolean {
         if (closeDetails()) return true
+        val leavingProfile = currentRoute == NativeRoute.PROFILE
         val target = NativeRouteNavigator.backTarget(currentRoute) ?: return false
         showRoute(target)
-        navigation[target]?.requestFocus()
+        if (!leavingProfile) navigation[target]?.requestFocus()
         return true
     }
 
@@ -221,7 +276,11 @@ class PtvHostActivity : AppCompatActivity() {
             )
         ) {
             (visibleFragment as? HeroRefreshableRoute)?.refreshHero()
-            navigation[target]?.requestFocus()
+            if (target == NativeRoute.SETTINGS) {
+                visible?.let { linkPageAndNavigationFocus(target, it) }
+            } else {
+                navigation[NativeRouteNavigator.navigationSelection(target)]?.requestFocus()
+            }
             return
         }
 
@@ -238,8 +297,14 @@ class PtvHostActivity : AppCompatActivity() {
         val route = target.name.lowercase()
         val routeTrace = beginAsyncTrace("PiggieTV#route:$route")
         currentRoute = target
+        detailsItemType = null
         PtvDiagnosticsManager.routeRequested(route)
-        navigation.forEach { (navRoute, button) -> button.isSelected = navRoute == target }
+        NativePtvShell.applyRailPresentation(navigationRail, target)
+        val selectedNavigation = NativeRouteNavigator.navigationSelection(target)
+        navigation.forEach { (navRoute, button) -> button.isSelected = navRoute == selectedNavigation }
+        if (target != NativeRoute.SETTINGS && target != NativeRoute.PROFILE) {
+            navigation[NativeRoute.SETTINGS]?.nextFocusDownId = View.NO_ID
+        }
 
         // restoreCachedFragments() makes the route cache authoritative after state restoration.
         // A tag lookup here can rediscover an active Fragment whose removal is already queued by
@@ -295,6 +360,9 @@ class PtvHostActivity : AppCompatActivity() {
 
         visibleFragment = fragment
         transaction.runOnCommit {
+            if (currentRoute == target && detailsFragment == null) {
+                linkPageAndNavigationFocus(target, fragment)
+            }
             val diagnostics = PtvDiagnosticsManager.isEnabled()
             if (diagnostics) PtvDiagnosticsManager.routeVisible(route, describeFocus(currentFocus))
             contentFrame.postOnAnimation {
@@ -308,7 +376,64 @@ class PtvHostActivity : AppCompatActivity() {
             }
         }.commit()
 
-        if (currentFocus == null) navigation[target]?.requestFocus()
+        if (currentFocus == null) navigation[selectedNavigation]?.requestFocus()
+    }
+
+    private fun linkPageAndNavigationFocus(route: NativeRoute, fragment: Fragment) {
+        val firstControl = when (route) {
+            NativeRoute.SETTINGS -> (fragment as? SettingsFragment)?.firstControlForNavigation()
+            NativeRoute.PROFILE -> fragment.view?.findViewById<View>(R.id.ptv_profile_settings_entry)
+            else -> return
+        } ?: return
+        val settingsNavigation = navigation[NativeRoute.SETTINGS] ?: return
+        if (firstControl.id == View.NO_ID) firstControl.id = View.generateViewId()
+        settingsNavigation.nextFocusDownId = firstControl.id
+        firstControl.nextFocusUpId = settingsNavigation.id
+        firstControl.requestFocus()
+    }
+
+    fun updateSettingsFirstControl(firstControl: View) {
+        if (currentRoute != NativeRoute.SETTINGS) return
+        val settingsNavigation = navigation[NativeRoute.SETTINGS] ?: return
+        if (firstControl.id == View.NO_ID) firstControl.id = View.generateViewId()
+        settingsNavigation.nextFocusDownId = firstControl.id
+        firstControl.nextFocusUpId = settingsNavigation.id
+    }
+
+    fun updateShowsSecondaryControls(controls: List<View>, selected: View?) {
+        if (currentRoute != NativeRoute.SHOWS) return
+        val showsNavigation = navigation[NativeRoute.SHOWS] ?: return
+        controls.forEach { control -> control.nextFocusUpId = showsNavigation.id }
+        selected?.let { showsNavigation.nextFocusDownId = it.id }
+    }
+
+    private fun resolveContentUpExit(focused: View, defaultTarget: View): View {
+        if (navigation.values.none { it === defaultTarget }) return defaultTarget
+        if (detailsFragment != null) return defaultTarget
+
+        val routeView = visibleFragment
+            ?.takeIf { it.tag == routeTag(currentRoute) && it.isAdded && !it.isHidden }
+            ?.view
+        if (routeView == null || !isDescendantOf(focused, routeView)) return focused
+
+        val routeNavigation = navigation[NativeRouteNavigator.navigationSelection(currentRoute)]
+        return routeNavigation
+            ?.takeIf {
+                it.parent === navigationRail &&
+                    it.visibility == View.VISIBLE &&
+                    it.isFocusable &&
+                    it.width > 0 && it.height > 0
+            }
+            ?: focused
+    }
+
+    private fun isDescendantOf(view: View, ancestor: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
+        }
+        return false
     }
 
     private fun createRouteFragment(target: NativeRoute): Fragment = when (target) {
@@ -351,6 +476,8 @@ class PtvHostActivity : AppCompatActivity() {
         detailsTraceCookie = beginAsyncTrace("PiggieTV#details:firstInteractive")
         val fragment = MediaDetailsFragment.newInstance(item.id)
         detailsFragment = fragment
+        detailsItemType = item.type
+        NativePtvShell.applyRailPresentation(navigationRail, currentRoute, detailsItemType)
 
         supportFragmentManager.beginTransaction()
             .setReorderingAllowed(true)
@@ -381,6 +508,8 @@ class PtvHostActivity : AppCompatActivity() {
         }
         val closeRequestedAtMs = android.os.SystemClock.elapsedRealtime()
         detailsFragment = null
+        detailsItemType = null
+        NativePtvShell.applyRailPresentation(navigationRail, currentRoute)
         endDetailsTrace()
         val route = visibleFragment
         supportFragmentManager.beginTransaction()
@@ -478,11 +607,82 @@ class PtvHostActivity : AppCompatActivity() {
         return if (view.getGlobalVisibleRect(rect)) "${rect.left},${rect.top},${rect.right},${rect.bottom}" else "not-visible"
     }
 
-    private fun returnToLogin() {
-        startActivity(Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
-        })
+    private fun revalidateActiveSession() {
+        cancelSessionRevalidation()
+        val candidate = activeSession ?: return
+        if (!AuthSessionCoordinator.isValidated(candidate)) {
+            returnToLogin()
+            return
+        }
+        val scope = NativeRequestScope()
+        val generation = ++sessionRevalidationGeneration
+        sessionRevalidationScope = scope
+        thread(name = "ptv-active-session-validation") {
+            val result = runCatching {
+                sessionApi.withRequestScope(scope) { sessionApi.validateSession(candidate) }
+            }
+            runOnUiThread {
+                if (!canApplySessionRevalidation(generation, scope, candidate)) return@runOnUiThread
+                sessionRevalidationScope = null
+                result.onSuccess { refreshed ->
+                    // Mutable display/admin metadata may refresh in memory. Persistent writes stay
+                    // inside AuthSessionCoordinator so this lifecycle check cannot race logout.
+                    if (AuthSessionCoordinator.isValidated(refreshed)) activeSession = refreshed
+                }.onFailure { error ->
+                    val decision = AuthFailurePolicy.validationFailure(error)
+                    if (
+                        decision.destination == SessionRestoreDestination.LOGIN &&
+                        decision.clearAuthentication
+                    ) {
+                        clearRejectedSession(candidate)
+                    }
+                    // Connectivity, server, parse, and cancellation failures leave both the
+                    // validated in-memory marker and durable credentials untouched.
+                }
+            }
+        }
+    }
+
+    private fun canApplySessionRevalidation(
+        generation: Long,
+        scope: NativeRequestScope,
+        candidate: NativeSession,
+    ): Boolean =
+        generation == sessionRevalidationGeneration &&
+            sessionRevalidationScope === scope &&
+            lifecycle.currentState == Lifecycle.State.RESUMED &&
+            !isFinishing &&
+            !isDestroyed &&
+            activeSession === candidate &&
+            AuthSessionCoordinator.isValidated(candidate)
+
+    private fun cancelSessionRevalidation() {
+        sessionRevalidationGeneration += 1L
+        sessionRevalidationScope?.cancel()
+        sessionRevalidationScope = null
+    }
+
+    private fun clearRejectedSession(candidate: NativeSession) {
+        if (activeSession !== candidate || !AuthSessionCoordinator.isValidated(candidate)) return
+        cancelSessionRevalidation()
+        val cleared = AuthLogout.clearLocalAuthentication(
+            store,
+            sessionApi::cancelInFlightRequests,
+        )
+        activeSession = null
+        returnToLogin(storageClearFailed = !cleared)
+    }
+
+    private fun returnToLogin(storageClearFailed: Boolean = false) {
+        startActivity(AuthLogout.loginIntent(this, storageClearFailed))
         finish()
+    }
+
+    fun signOut() {
+        cancelSessionRevalidation()
+        val cleared = AuthLogout.clearLocalAuthentication(store)
+        activeSession = null
+        AuthLogout.returnToLogin(this, storageClearFailed = !cleared)
     }
 
     companion object {
@@ -511,6 +711,7 @@ class PtvHostActivity : AppCompatActivity() {
         private const val ROUTE_CACHE_SIZE = 2
         private const val ROUTE_TAG_PREFIX = "ptv-route-"
         private const val DETAILS_TAG = "ptv-details"
+        private const val DETAILS_ITEM_TYPE_STATE = "ptv_details_item_type"
         private const val NO_TRACE = -1
         private const val PERFORMANCE_TAG = "PtvPerformance"
         private val TRACKED_DPAD_KEYS = setOf(

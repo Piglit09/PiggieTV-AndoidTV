@@ -16,7 +16,8 @@ class DiscoveryPageAdapter(
     private val definitions: List<ShelfDefinition>,
     private val createShelfContent: (DiscoveryShelf) -> View,
     private val onRetry: (String) -> Unit,
-    private val bindHeader: ((FrameLayout) -> Unit)? = null
+    private val bindHeader: ((FrameLayout) -> Unit)? = null,
+    private val openRowSurface: Boolean = false
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private val shelves = LinkedHashMap<String, DiscoveryShelf>()
     val headerOffset: Int = if (bindHeader == null) 0 else 1
@@ -60,7 +61,7 @@ class DiscoveryPageAdapter(
             return HeaderHolder(FrameLayout(parent.context))
         }
         return ShelfHolder(
-            DiscoveryShelfSlotView(parent.context, definitions[viewType]).apply {
+            DiscoveryShelfSlotView(parent.context, definitions[viewType], openRowSurface).apply {
                 layoutParams = RecyclerView.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -166,10 +167,13 @@ internal enum class DiscoveryMediaAction {
 internal object DiscoveryMediaActionPolicy {
     fun resolve(
         itemType: String,
-        shelfType: com.piggie.tv.data.discovery.DiscoveryShelfType
+        shelfType: com.piggie.tv.data.discovery.DiscoveryShelfType,
+        filterType: com.piggie.tv.data.discovery.DiscoveryFilterType? = null
     ): DiscoveryMediaAction = when {
         itemType.equals("ViewMore", ignoreCase = true) -> DiscoveryMediaAction.VIEW_MORE
-        shelfType == com.piggie.tv.data.discovery.DiscoveryShelfType.CONTINUE_WATCHING &&
+        (shelfType == com.piggie.tv.data.discovery.DiscoveryShelfType.CONTINUE_WATCHING ||
+            (shelfType == com.piggie.tv.data.discovery.DiscoveryShelfType.LIBRARY_SPECIFIC &&
+                filterType == com.piggie.tv.data.discovery.DiscoveryFilterType.CONTINUE_WATCHING)) &&
             (itemType.equals("Movie", ignoreCase = true) || itemType.equals("Episode", ignoreCase = true)) ->
             DiscoveryMediaAction.RESUME_PLAYBACK
         else -> DiscoveryMediaAction.DETAILS

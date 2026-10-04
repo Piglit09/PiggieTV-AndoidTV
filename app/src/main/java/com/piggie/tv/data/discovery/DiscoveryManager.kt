@@ -131,7 +131,10 @@ object DiscoveryManager {
         val bypassFreshCache = DebugDiscoveryFaultInjector.shouldBypassFreshCache()
         ordered.forEach { definition ->
             val key = cacheKey(nativeSession, manifest.page, definition)
-            val cached = memoryCache.get(key)
+            // A named library may be renamed, removed or recreated while the route is away.
+            // Resolve its current user-visible root on every entry before showing any cards.
+            val cached = if (definition.type == DiscoveryShelfType.LIBRARY_SPECIFIC) null
+                else memoryCache.get(key)
             val refreshAttempt = if (bypassFreshCache && cached?.entry?.shelf?.items?.isNotEmpty() == true) 1 else 0
             attempts[definition.id] = AtomicInteger(refreshAttempt)
             if (cached != null && cached.entry.shelf.items.isNotEmpty()) {
@@ -361,12 +364,61 @@ object DiscoveryManager {
                 params["IncludeItemTypes"] = request.itemTypes.joinToString(",")
                 params["Recursive"] = "true"
                 params["Fields"] = JellyfinItemFields.CARD
+
+                val scopedAlias = request.libraryName?.takeIf(String::isNotBlank)
+                    ?: if (request.filter.type == DiscoveryFilterType.LIBRARY) {
+                        request.filter.value?.takeIf(String::isNotBlank)
+                    } else null
+                val currentLibraryId = if (scopedAlias != null) {
+                    val alias = scopedAlias
+                    val resolved = alias?.let { api.findLibraryId(nativeSession, it) }
+                    if (resolved.isNullOrBlank() ||
+                        (request.libraryId != null && request.libraryId != resolved)
+                    ) {
+                        if (!cancelled.get()) onResult(DiscoveryBrowserResult(
+                            status = ShelfStatus.MISSING_LIBRARY,
+                            message = "The selected library is not available."
+                        ))
+                        return@thread
+                    }
+                    resolved
+                } else if (request.filter.type == DiscoveryFilterType.LIBRARY) {
+                    if (!cancelled.get()) onResult(DiscoveryBrowserResult(
+                        status = ShelfStatus.MISSING_LIBRARY,
+                        message = "The selected library is not available."
+                    ))
+                    return@thread
+                } else {
+                    request.libraryId?.takeIf(String::isNotBlank)
+                }
                 
                 when (request.filter.type) {
                     DiscoveryFilterType.GENRE -> params["Genres"] = request.filter.value ?: ""
                     DiscoveryFilterType.STUDIO -> params["Studios"] = request.filter.value ?: ""
-                    DiscoveryFilterType.LIBRARY -> params["ParentId"] = request.libraryId ?: ""
+                    DiscoveryFilterType.LIBRARY -> params["ParentId"] = requireNotNull(currentLibraryId)
                     else -> {}
+                }
+                if (request.filter.type != DiscoveryFilterType.LIBRARY && currentLibraryId != null) {
+                    params["ParentId"] = currentLibraryId
+                }
+                when (request.sort) {
+                    DiscoveryBrowseSort.RECENT -> {
+                        params["SortBy"] = "DateCreated"
+                        params["SortOrder"] = "Descending"
+                    }
+                    DiscoveryBrowseSort.TITLE -> {
+                        params["SortBy"] = "SortName"
+                        params["SortOrder"] = "Ascending"
+                    }
+                    DiscoveryBrowseSort.RATING -> {
+                        params["SortBy"] = "CommunityRating"
+                        params["SortOrder"] = "Descending"
+                    }
+                }
+                when (request.watchFilter) {
+                    DiscoveryBrowseWatchFilter.ALL -> Unit
+                    DiscoveryBrowseWatchFilter.UNPLAYED -> params["Filters"] = "IsUnplayed"
+                    DiscoveryBrowseWatchFilter.IN_PROGRESS -> params["Filters"] = "IsResumable"
                 }
                 
                 val items = api.fetchItems(nativeSession, params)
@@ -534,8 +586,7 @@ object DiscoveryManager {
                 val scoringMs = SystemClock.elapsedRealtime() - scoringStarted
                 val status = if (finalItems.isNotEmpty()) ShelfStatus.READY else ShelfStatus.EMPTY
 
-                val viewMore = if (definition.type == DiscoveryShelfType.LIBRARY_SPECIFIC || 
-                                 definition.type == DiscoveryShelfType.RANDOM_GENRE ||
+                val viewMore = if (definition.type == DiscoveryShelfType.RANDOM_GENRE ||
                                  definition.type == DiscoveryShelfType.RANDOM_STUDIO) {
                     MediaItem(
                         id = "view-more-${definition.id}",
@@ -781,7 +832,9 @@ object DiscoveryManager {
         page: DiscoveryPage,
         shelf: DiscoveryShelf
     ): DiscoveryShelf {
-        if (shelf.status != ShelfStatus.READY || shelf.items.isEmpty()) return shelf
+        if (shelf.status != ShelfStatus.READY || shelf.items.isEmpty() ||
+            shelf.definition.type == DiscoveryShelfType.LIBRARY_SPECIFIC
+        ) return shelf
         val estimatedBytes = estimateShelfBytes(shelf)
         memoryCache.put(cacheKey(session, page, shelf.definition), shelf, estimatedBytes)
         val enriched = shelf.copy(
@@ -850,25 +903,43 @@ object DiscoveryManager {
                 ShelfDefinition("home.genre.2", DiscoveryShelfType.RANDOM_GENRE, "Comedy", MediaCardPresentation.POSTER, listOf("Movie", "Series"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_GENRE, "Comedy"), priority = 80)
             )
             "MOVIES" -> listOf(
-                ShelfDefinition("movies.added", DiscoveryShelfType.RECENTLY_ADDED, "Recently Added", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RECENTLY_ADDED)),
-                ShelfDefinition("movies.continue", DiscoveryShelfType.CONTINUE_WATCHING, "Continue Watching", MediaCardPresentation.LANDSCAPE, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.CONTINUE_WATCHING)),
-                ShelfDefinition("movies.like", DiscoveryShelfType.YOU_MAY_ALSO_LIKE, "You May Also Like", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RECOMMENDED)),
-                ShelfDefinition("movies.popular", DiscoveryShelfType.POPULAR, "Popular Movies", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.POPULAR)),
-                ShelfDefinition("movies.genre.1", DiscoveryShelfType.RANDOM_GENRE, "Genres", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_GENRE, "Action")),
-                ShelfDefinition("movies.genre.2", DiscoveryShelfType.RANDOM_GENRE, "More Genres", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_GENRE, "Drama")),
-                ShelfDefinition("movies.studio.1", DiscoveryShelfType.RANDOM_STUDIO, "Studios", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_STUDIO, "Marvel")),
-                ShelfDefinition("movies.studio.2", DiscoveryShelfType.RANDOM_STUDIO, "More Studios", MediaCardPresentation.POSTER, listOf("Movie"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_STUDIO, "Warner"))
+                ShelfDefinition(
+                    "movies.library",
+                    DiscoveryShelfType.LIBRARY_SPECIFIC,
+                    "Recently Added Movies",
+                    MediaCardPresentation.POSTER,
+                    listOf("Movie"),
+                    libraryName = "Movies",
+                    filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Movies")
+                ),
+                ShelfDefinition(
+                    "movies.continue",
+                    DiscoveryShelfType.LIBRARY_SPECIFIC,
+                    "Continue Watching",
+                    MediaCardPresentation.LANDSCAPE,
+                    listOf("Movie"),
+                    libraryName = "Movies",
+                    filter = DiscoveryFilter(DiscoveryFilterType.CONTINUE_WATCHING)
+                )
             )
-            "SHOWS" -> listOf(
-                ShelfDefinition("shows.added", DiscoveryShelfType.RECENTLY_ADDED, "Recently Added", MediaCardPresentation.POSTER, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.RECENTLY_ADDED)),
-                ShelfDefinition("shows.continue", DiscoveryShelfType.CONTINUE_WATCHING, "Continue Watching", MediaCardPresentation.LANDSCAPE, listOf("Episode"), filter = DiscoveryFilter(DiscoveryFilterType.CONTINUE_WATCHING)),
-                ShelfDefinition("shows.popular", DiscoveryShelfType.POPULAR, "Popular Shows", MediaCardPresentation.POSTER, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.POPULAR)),
-                ShelfDefinition("shows.anime", DiscoveryShelfType.LIBRARY_SPECIFIC, "Anime", MediaCardPresentation.POSTER, listOf("Series"), libraryName = "Anime", filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Anime")),
-                ShelfDefinition("shows.cartoons", DiscoveryShelfType.LIBRARY_SPECIFIC, "Cartoons", MediaCardPresentation.POSTER, listOf("Series"), libraryName = "Cartoons", filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Cartoons")),
-                ShelfDefinition("shows.tv", DiscoveryShelfType.LIBRARY_SPECIFIC, "TV Shows", MediaCardPresentation.POSTER, listOf("Series"), libraryName = "Shows", filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, "Shows")),
-                ShelfDefinition("shows.episodes", DiscoveryShelfType.LATEST_EPISODES, "Latest Episodes", MediaCardPresentation.LANDSCAPE, listOf("Episode"), filter = DiscoveryFilter(DiscoveryFilterType.RECENTLY_ADDED)),
-                ShelfDefinition("shows.genre", DiscoveryShelfType.RANDOM_GENRE, "Genre Discovery", MediaCardPresentation.POSTER, listOf("Series"), filter = DiscoveryFilter(DiscoveryFilterType.RANDOM_GENRE, "Drama"))
-            )
+            "SHOWS", "ANIME", "CARTOONS" -> {
+                val library = when (route) {
+                    "ANIME" -> "Anime"
+                    "CARTOONS" -> "Cartoons"
+                    else -> "Shows"
+                }
+                listOf(
+                    ShelfDefinition(
+                        "${route.lowercase()}.library",
+                        DiscoveryShelfType.LIBRARY_SPECIFIC,
+                        "Recently Added $library",
+                        MediaCardPresentation.POSTER,
+                        listOf("Series"),
+                        libraryName = library,
+                        filter = DiscoveryFilter(DiscoveryFilterType.LIBRARY, library)
+                    )
+                )
+            }
             else -> emptyList()
         }
         return PageDefinition(route, pageShelves)

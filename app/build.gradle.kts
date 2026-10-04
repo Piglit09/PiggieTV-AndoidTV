@@ -26,6 +26,11 @@ val piggieTvVersion = providers.gradleProperty("piggietv.version").orNull
 android {
     namespace = "com.piggie.tv"
     compileSdk = 35
+    testBuildType = if (providers.gradleProperty("ptv.premiumFixtureTests").orNull == "true") {
+        "premiumFixture"
+    } else {
+        "debug"
+    }
 
     defaultConfig {
         applicationId = "com.piggie.tv"
@@ -52,6 +57,13 @@ android {
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "true")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "true")
+            buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
+        }
+        create("premiumFixture") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".premiumfixture"
+            matchingFallbacks += listOf("debug")
+            buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "true")
         }
         create("beta") {
             initWith(getByName("release"))
@@ -61,6 +73,7 @@ android {
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "true")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
+            buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
             isDebuggable = false
         }
         release {
@@ -73,6 +86,7 @@ android {
             buildConfigField("boolean", "ENABLE_DIAGNOSTICS", "false")
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
+            buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
         }
     }
 

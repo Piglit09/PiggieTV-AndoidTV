@@ -33,6 +33,7 @@ import coil.load
 import coil.size.Size
 import coil.transform.Transformation
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.memory.MemoryPressureParticipant
 import com.piggie.tv.memory.MemoryPressurePolicy
@@ -132,6 +133,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     private var episodesContainer: LinearLayout by viewReference()
     private var relatedContainer: LinearLayout by viewReference()
     private var backdrop: ImageView by viewReference()
+    private var sceneScrim: View by viewReference()
 
     private var currentItem: MediaItem? = null
     private var nextUpItem: MediaItem? = null
@@ -182,7 +184,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             )
         }
         session = (activity as? PtvHostActivity)?.session
-            ?: SecureSessionStore(requireContext()).read()
+            ?: (activity as? MediaDetailsActivity)?.session
+            ?: AuthSessionCoordinator.validatedSession(SecureSessionStore(requireContext()))
             ?: error("No active session")
         features = TvRenderingRuntime.features()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && Trace.isEnabled()) {
@@ -223,13 +226,14 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun cancelAllApiWork() {
-        val workers = apiWorkers.entries.toList()
         apiWorkerKeys.clear()
-        apiWorkers.clear()
-        workers.forEach { (worker, scope) ->
+        // A worker can remove itself while this fragment is retiring. Iterating the live
+        // concurrent map avoids Kotlin's size-based toList snapshot racing that removal.
+        apiWorkers.forEach { worker, scope ->
             scope.cancel()
             worker.interrupt()
         }
+        apiWorkers.clear()
         api.cancelInFlightRequests()
     }
 
@@ -388,15 +392,21 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             setImageDrawable(PTVColors.background.toDrawable())
         }
         root.addView(backdrop, ViewGroup.LayoutParams(-1, -1))
-        root.addView(View(context).apply {
+        sceneScrim = View(context).apply {
             setBackgroundResource(R.drawable.hero_gradient_overlay)
-        }, ViewGroup.LayoutParams(-1, -1))
+        }
+        root.addView(sceneScrim, ViewGroup.LayoutParams(-1, -1))
 
         scroll = ScrollView(context).apply {
             isFillViewport = true
             isSmoothScrollingEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            clipToPadding = false
+            val hosted = activity is PtvHostActivity
+            if (hosted) {
+                // Keep scrolling copy below the floating rail while the backdrop fills the root.
+                setPadding(0, context.dim(R.dimen.tv_floating_nav_clearance), 0, 0)
+            }
+            clipToPadding = hosted
         }
         val page = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -404,7 +414,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 context.dim(R.dimen.tv_screen_margin_horizontal),
                 context.dim(R.dimen.tv_screen_margin_vertical),
                 context.dim(R.dimen.tv_screen_margin_horizontal),
-                context.dim(R.dimen.tv_spacing_large)
+                context.dim(R.dimen.tv_spacing_large) +
+                    context.dim(R.dimen.ptv_details_shelf_focus_clearance)
             )
         }
         val top = LinearLayout(context).apply {
@@ -477,7 +488,6 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         infoLeft.addView(identity)
         infoLeft.addView(secondaryTitle, topMargin(R.dimen.tv_spacing_small))
         infoLeft.addView(metadataContainer, topMargin(R.dimen.tv_spacing_small))
-        infoLeft.addView(movieFactsContainer, topMargin(R.dimen.tv_spacing_small))
         infoLeft.addView(overview, topMargin(R.dimen.tv_spacing_medium))
 
         actionsRow = LinearLayout(context).apply {
@@ -485,6 +495,7 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             gravity = Gravity.CENTER_VERTICAL
         }
         infoLeft.addView(actionsRow, topMargin(R.dimen.tv_spacing_medium))
+        infoLeft.addView(movieFactsContainer, topMargin(R.dimen.tv_spacing_medium))
         top.addView(infoLeft, LinearLayout.LayoutParams(0, -2, 1f))
         
         page.addView(top)
@@ -509,6 +520,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
 
     private fun renderLoadingIdentity() {
         resetTitleArtwork("Loading details…")
+        DetailsVisualStyle.applyScene(null, sceneScrim, poster, overview)
+        DetailsVisualStyle.applyIdentity(null, title)
         poster.dispose()
         poster.setImageDrawable(null)
         poster.visibility = View.GONE
@@ -625,6 +638,8 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
 
         // 1. Side rail. Movies and series share the same rounded poster treatment.
         renderSideInfo(item)
+        DetailsVisualStyle.applyScene(item.type, sceneScrim, poster, overview)
+        DetailsVisualStyle.applyIdentity(item.type, title)
 
         // 2. Center Info
         resetTitleArtwork(item.title)
@@ -956,6 +971,80 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
     
+
+    private enum class NoArgActionKind {
+        PLAY,
+        SEASON_PLAY_ALL,
+        RETRY_SERIES,
+        RETRY_SEASON,
+        FAVORITE,
+        PLAYED
+    }
+
+    private inner class DeferredNoArgAction(
+        private val kind: NoArgActionKind,
+        private val item: MediaItem? = null,
+        private val enabled: Boolean = true
+    ) : () -> Unit {
+        override fun invoke() {
+            when (kind) {
+                NoArgActionKind.PLAY -> {
+                    val selected = requireNotNull(item)
+                    when (selected.type) {
+                        "Book" -> ReaderActivity.start(requireContext(), currentItem ?: selected)
+                        "Series" -> playSeries(currentItem ?: selected)
+                        else -> startPlayback(currentItem ?: selected)
+                    }
+                }
+                NoArgActionKind.SEASON_PLAY_ALL -> if (enabled) {
+                    rememberExternalFocus(activity?.currentFocus)
+                    VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = false)
+                }
+                NoArgActionKind.RETRY_SERIES -> loadSeriesEpisodes(currentItem ?: requireNotNull(item), requestGeneration)
+                NoArgActionKind.RETRY_SEASON -> loadSeasonEpisodes(currentItem ?: requireNotNull(item), requestGeneration)
+                NoArgActionKind.FAVORITE -> updateFavorite(requireNotNull(item))
+                NoArgActionKind.PLAYED -> updatePlayed(requireNotNull(item))
+            }
+        }
+    }
+
+    private enum class ViewActionKind {
+        SERIES_PLAY_ALL,
+        SERIES_SHUFFLE_ALL,
+        SEASON_SHUFFLE_ALL,
+        VIEW_SERIES,
+        AUDIO,
+        SUBTITLES,
+        QUALITY
+    }
+
+    private inner class DeferredViewAction(
+        private val kind: ViewActionKind,
+        private val item: MediaItem? = null,
+        private val seriesId: String? = null,
+        private val enabled: Boolean = true
+    ) : (View) -> Unit {
+        override fun invoke(opener: View) {
+            when (kind) {
+                ViewActionKind.SERIES_PLAY_ALL -> {
+                    rememberExternalFocus(opener)
+                    VideoPlayerActivity.startSeries(requireContext(), currentSeriesEpisodes, shuffle = false)
+                }
+                ViewActionKind.SERIES_SHUFFLE_ALL -> {
+                    rememberExternalFocus(opener)
+                    VideoPlayerActivity.startSeries(requireContext(), currentSeriesEpisodes, shuffle = true)
+                }
+                ViewActionKind.SEASON_SHUFFLE_ALL -> if (enabled) {
+                    rememberExternalFocus(opener)
+                    VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = true)
+                }
+                ViewActionKind.VIEW_SERIES -> openNestedDetails(requireNotNull(seriesId))
+                ViewActionKind.AUDIO -> showAudioSelection(requireNotNull(item), opener)
+                ViewActionKind.SUBTITLES -> showSubtitleSelection(requireNotNull(item), opener)
+                ViewActionKind.QUALITY -> showConnectionSpeedSelection(opener)
+            }
+        }
+    }
     private fun renderActions(
         item: MediaItem,
         restoreDescription: String? = null,
@@ -978,13 +1067,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             item.playbackPositionTicks > 0 -> "Resume"
             else -> "Play"
         }
-        val play = premiumActionButton(playLabel, android.R.drawable.ic_media_play) {
-            when (item.type) {
-                "Book" -> ReaderActivity.start(requireContext(), currentItem ?: item)
-                "Series" -> playSeries(currentItem ?: item)
-                else -> startPlayback(currentItem ?: item)
-            }
-        }
+        val play = premiumActionButton(
+            playLabel,
+            android.R.drawable.ic_media_play,
+            DeferredNoArgAction(NoArgActionKind.PLAY, item)
+        )
         primaryAction = play
         addAction(play)
 
@@ -994,44 +1081,37 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 episodeQueueActionButton(
                     label = "Play All",
                     description = "Play all episodes in this series",
-                    enabled = queueDecision.actionsEnabled
-                ) { opener ->
-                    rememberExternalFocus(opener)
-                    VideoPlayerActivity.startSeries(
-                        requireContext(),
-                        currentSeriesEpisodes,
-                        shuffle = false
-                    )
-                }
+                    enabled = queueDecision.actionsEnabled,
+                    action = DeferredViewAction(ViewActionKind.SERIES_PLAY_ALL)
+                )
             )
             addAction(
                 episodeQueueActionButton(
                     label = "Shuffle All",
                     description = "Shuffle all episodes in this series",
-                    enabled = queueDecision.actionsEnabled
-                ) { opener ->
-                    rememberExternalFocus(opener)
-                    VideoPlayerActivity.startSeries(
-                        requireContext(),
-                        currentSeriesEpisodes,
-                        shuffle = true
-                    )
-                }
+                    enabled = queueDecision.actionsEnabled,
+                    action = DeferredViewAction(ViewActionKind.SERIES_SHUFFLE_ALL)
+                )
             )
             queueDecision.statusLabel?.let { label ->
                 addAction(
-                    episodeQueueStatusButton(label, queueDecision.retryAvailable) {
-                        loadSeriesEpisodes(currentItem ?: item, requestGeneration)
-                    }
+                    episodeQueueStatusButton(
+                        label,
+                        queueDecision.retryAvailable,
+                        DeferredNoArgAction(NoArgActionKind.RETRY_SERIES, item)
+                    )
                 )
             }
         }
 
         EpisodeSeriesNavigationPolicy.seriesId(item)?.let { seriesId ->
             addAction(
-                actionButton("View Series", true, SERIES_DESCRIPTION) {
-                    openNestedDetails(seriesId)
-                }.apply { tag = VIEW_SERIES_FOCUS_TAG }
+                actionButton(
+                    "View Series",
+                    true,
+                    SERIES_DESCRIPTION,
+                    DeferredViewAction(ViewActionKind.VIEW_SERIES, seriesId = seriesId)
+                ).apply { tag = VIEW_SERIES_FOCUS_TAG }
             )
         }
 
@@ -1039,27 +1119,29 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             iconActionButton(
                 R.drawable.ic_action_favorite,
                 item.isFavorite,
-                if (item.isFavorite) "Remove from favorites" else "Add to favorites"
-            ) { updateFavorite(item) },
+                if (item.isFavorite) "Remove from favorites" else "Add to favorites",
+                DeferredNoArgAction(NoArgActionKind.FAVORITE, item)
+            ),
             square = true
         )
         addAction(
             iconActionButton(
                 R.drawable.ic_action_watched,
                 item.isPlayed,
-                if (item.isPlayed) "Mark unplayed" else "Mark played"
-            ) { updatePlayed(item) },
+                if (item.isPlayed) "Mark unplayed" else "Mark played",
+                DeferredNoArgAction(NoArgActionKind.PLAYED, item)
+            ),
             square = true
         )
 
         if (playableVideo) {
             if (item.audioTracks.size > 1) {
-                addAction(actionButton("Audio", true, AUDIO_DESCRIPTION) { showAudioSelection(item, it) })
+                addAction(actionButton("Audio", true, AUDIO_DESCRIPTION, DeferredViewAction(ViewActionKind.AUDIO, item)))
             }
             if (item.subtitleTracks.isNotEmpty()) {
-                addAction(actionButton("Subtitles", true, SUBTITLE_DESCRIPTION) { showSubtitleSelection(item, it) })
+                addAction(actionButton("Subtitles", true, SUBTITLE_DESCRIPTION, DeferredViewAction(ViewActionKind.SUBTITLES, item)))
             }
-            addAction(actionButton("Quality", true, SPEED_DESCRIPTION) { showConnectionSpeedSelection(it) })
+            addAction(actionButton("Quality", true, SPEED_DESCRIPTION, DeferredViewAction(ViewActionKind.QUALITY)))
         }
 
         actionsRow.children().forEach { action ->
@@ -1068,12 +1150,16 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) requestFirstSeasonOrSecondary() else false
             }
         }
+        DetailsVisualStyle.applyActions(item.type, actionsRow, primaryAction)
         if (restoreDescription != null || restoreIndex != null) {
             // Capture the concrete row. A fast Details close can destroy the fragment view before
             // this focus callback runs; touching the clearable actionsRow property then crashes.
             val row = actionsRow
             row.post {
                 if (destroyed || !row.isAttachedToWindow) return@post
+                if (!DetailsActionFocusPolicy.mayRestore(
+                    activity?.currentFocus ?: root.findFocus(), row
+                )) return@post
                 val target = restoreDescription?.let { description ->
                     row.children().firstOrNull { it.contentDescription == description }
                 } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
@@ -1091,12 +1177,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     ) {
         var defaultFocus: View? = null
         val queueDecision = EpisodeQueueActionPolicy.decide(seasonEpisodeQueueState)
-        val playAll = premiumActionButton("Play All", android.R.drawable.ic_media_play) {
-            if (queueDecision.actionsEnabled) {
-                rememberExternalFocus(activity?.currentFocus)
-                VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = false)
-            }
-        }.apply {
+        val playAll = premiumActionButton(
+            "Play All",
+            android.R.drawable.ic_media_play,
+            DeferredNoArgAction(NoArgActionKind.SEASON_PLAY_ALL, enabled = queueDecision.actionsEnabled)
+        ).apply {
             contentDescription = if (queueDecision.actionsEnabled) {
                 "Play all episodes in this season"
             } else {
@@ -1108,13 +1193,9 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         val shuffleAll = episodeQueueActionButton(
             "Shuffle All",
             "Shuffle all episodes in this season",
-            queueDecision.actionsEnabled
-        ) { opener ->
-            if (queueDecision.actionsEnabled) {
-                rememberExternalFocus(opener)
-                VideoPlayerActivity.startSeason(requireContext(), currentSeasonEpisodes, shuffle = true)
-            }
-        }.apply { id = View.generateViewId() }
+            queueDecision.actionsEnabled,
+            DeferredViewAction(ViewActionKind.SEASON_SHUFFLE_ALL, enabled = queueDecision.actionsEnabled)
+        ).apply { id = View.generateViewId() }
         playAll.nextFocusRightId = shuffleAll.id
         shuffleAll.nextFocusLeftId = playAll.id
         if (queueDecision.actionsEnabled) {
@@ -1125,17 +1206,22 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         addAction(playAll)
         addAction(shuffleAll)
         queueDecision.statusLabel?.let { label ->
-            val status = episodeQueueStatusButton(label, queueDecision.retryAvailable) {
-                loadSeasonEpisodes(currentItem ?: season, requestGeneration)
-            }
+            val status = episodeQueueStatusButton(
+                label,
+                queueDecision.retryAvailable,
+                DeferredNoArgAction(NoArgActionKind.RETRY_SEASON, season)
+            )
             addAction(status)
             if (defaultFocus == null && status.isFocusable) defaultFocus = status
         }
 
         EpisodeSeriesNavigationPolicy.seriesId(season)?.let { seriesId ->
-            val viewSeries = actionButton("View Series", true, SERIES_DESCRIPTION) {
-                openNestedDetails(seriesId)
-            }.apply { tag = VIEW_SERIES_FOCUS_TAG }
+            val viewSeries = actionButton(
+                "View Series",
+                true,
+                SERIES_DESCRIPTION,
+                DeferredViewAction(ViewActionKind.VIEW_SERIES, seriesId = seriesId)
+            ).apply { tag = VIEW_SERIES_FOCUS_TAG }
             addAction(viewSeries)
             if (defaultFocus == null) defaultFocus = viewSeries
         }
@@ -1143,16 +1229,18 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         val favorite = iconActionButton(
             R.drawable.ic_action_favorite,
             season.isFavorite,
-            if (season.isFavorite) "Remove from favorites" else "Add to favorites"
-        ) { updateFavorite(season) }
+            if (season.isFavorite) "Remove from favorites" else "Add to favorites",
+            DeferredNoArgAction(NoArgActionKind.FAVORITE, season)
+        )
         addAction(favorite, square = true)
         if (defaultFocus == null) defaultFocus = favorite
 
         val played = iconActionButton(
             R.drawable.ic_action_watched,
             season.isPlayed,
-            if (season.isPlayed) "Mark unplayed" else "Mark played"
-        ) { updatePlayed(season) }
+            if (season.isPlayed) "Mark unplayed" else "Mark played",
+            DeferredNoArgAction(NoArgActionKind.PLAYED, season)
+        )
         addAction(played, square = true)
 
         primaryAction = defaultFocus
@@ -1174,6 +1262,9 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             val row = actionsRow
             row.post {
                 if (destroyed || !row.isAttachedToWindow) return@post
+                if (!DetailsActionFocusPolicy.mayRestore(
+                    activity?.currentFocus ?: root.findFocus(), row
+                )) return@post
                 val target = restoreDescription?.let { description ->
                     row.children().firstOrNull { it.contentDescription == description }
                 } ?: restoreIndex?.takeIf { it in 0 until row.childCount }?.let(row::getChildAt)
@@ -1185,9 +1276,14 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     }
 
     private fun rerenderActionsPreservingFocus(item: MediaItem) {
-        val focused = activity?.currentFocus
-        val focusedIndex = focused?.takeIf { it.parent === actionsRow }?.let(actionsRow::indexOfChild)?.takeIf { it >= 0 }
-        renderActions(item, restoreDescription = focused?.contentDescription?.toString(), restoreIndex = focusedIndex)
+        val focusedAction = DetailsActionFocusPolicy.capture(
+            activity?.currentFocus ?: root.findFocus(), actionsRow
+        )
+        renderActions(
+            item,
+            restoreDescription = focusedAction?.description,
+            restoreIndex = focusedAction?.index
+        )
     }
 
     private fun LinearLayout.children(): Sequence<View> =
@@ -1816,7 +1912,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.HORIZONTAL, false)
         val list = RecyclerView(requireContext()).apply {
             layoutManager = manager
-            adapter = RelatedAdapter(items)
+            adapter = RelatedAdapter(
+                items,
+                premiumMaterial = currentItem?.type.equals("Movie", ignoreCase = true) ||
+                    currentItem?.type.equals("Series", ignoreCase = true)
+            )
             applyRenderingTuning(manager, 7)
         }
         relatedList = list
@@ -1825,6 +1925,26 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
             schedulePendingActionSecondaryFocus()
             schedulePendingDetailsRestore()
         }
+    }
+
+    private fun reserveFocusedShelfClearance(card: View): View {
+        val previous = card.onFocusChangeListener
+        card.onFocusChangeListener = View.OnFocusChangeListener { focusedView, focused ->
+            previous?.onFocusChange(focusedView, focused)
+            if (focused) {
+                scroll.post {
+                    if (destroyed || !isAdded || !focusedView.isAttachedToWindow ||
+                        !focusedView.hasFocus() || !isDescendant(scroll, focusedView)
+                    ) return@post
+                    DetailsFocusViewport.ensureBottomClearance(
+                        scroll,
+                        focusedView,
+                        requireContext().dim(R.dimen.ptv_details_shelf_focus_clearance)
+                    )
+                }
+            }
+        }
+        return card
     }
 
     private fun requestFirstSeasonOrSecondary(): Boolean {
@@ -1924,7 +2044,11 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
     ) : RecyclerView.Adapter<MediaCardHolder>() {
         override fun getItemCount(): Int = seasons.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-            MediaCardHolder(MediaCardFactory.createView(parent, MediaCardPresentation.POSTER))
+            MediaCardHolder(
+                reserveFocusedShelfClearance(
+                    MediaCardFactory.createView(parent, MediaCardPresentation.POSTER, premiumMaterial = true)
+                )
+            )
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val season = seasons[position]
             MediaCardFactory.bindView(holder, season, MediaCardPresentation.POSTER, session, api)
@@ -1973,10 +2097,16 @@ class MediaDetailsFragment : Fragment(), MemoryPressureParticipant {
         }
     }
 
-    private inner class RelatedAdapter(private val items: List<MediaItem>) : RecyclerView.Adapter<MediaCardHolder>() {
+    private inner class RelatedAdapter(
+        private val items: List<MediaItem>,
+        private val premiumMaterial: Boolean
+    ) : RecyclerView.Adapter<MediaCardHolder>() {
         override fun getItemCount(): Int = items.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-            MediaCardHolder(MediaCardFactory.createView(parent, MediaCardPresentation.POSTER))
+            MediaCardHolder(
+                MediaCardFactory.createView(parent, MediaCardPresentation.POSTER, premiumMaterial)
+                    .let { card -> if (premiumMaterial) reserveFocusedShelfClearance(card) else card }
+            )
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val item = items[position]
             MediaCardFactory.bindView(holder, item, MediaCardPresentation.POSTER, session, api)

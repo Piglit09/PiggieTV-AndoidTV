@@ -2,6 +2,8 @@ package com.piggie.tv.data.api
 
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
+import com.piggie.tv.BuildConfig
+import com.piggie.tv.util.LocalFixtureNetworkGuard
 import java.util.concurrent.TimeUnit
 
 /**
@@ -13,12 +15,13 @@ import java.util.concurrent.TimeUnit
 internal object PtvHttpClientOwner {
     val metadataBaseClient: OkHttpClient by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OkHttpClient.Builder()
+            .addInterceptor(LocalFixtureNetworkGuard)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(45, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
+            .followRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+            .followSslRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
             .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
             .build()
     }

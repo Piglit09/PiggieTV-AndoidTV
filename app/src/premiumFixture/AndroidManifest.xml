@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:allowBackup="false"
+        android:label="PiggieTV Local Fixture"
+        tools:replace="android:allowBackup,android:label">
+        <provider
+            android:name="com.piggie.tv.fixture.FixtureCardAuditProvider"
+            android:authorities="${applicationId}.card-audit"
+            android:exported="true" />
+    </application>
+</manifest>
