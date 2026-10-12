@@ -36,7 +36,9 @@ function Invoke-GitRead {
 
 function Assert-ProtectedRegistryAcl {
     param([string]$Path)
-    $acl = Get-Acl -LiteralPath $Path
+    # Windows PowerShell 5.1 cannot resolve Registry provider keys via Get-Acl
+    # -LiteralPath, even though Test-Path -LiteralPath succeeds for the same key.
+    $acl = Get-Acl -Path $Path
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
