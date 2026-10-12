@@ -3,8 +3,20 @@ param(
     [string] $PropertiesPath = (Join-Path $PSScriptRoot "..\gradle.properties")
 )
 
-$propertyName = "piggietv.version"
+$approvedRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$approvedPropertiesPath = [System.IO.Path]::GetFullPath((Join-Path $approvedRoot 'gradle.properties'))
 $path = [System.IO.Path]::GetFullPath($PropertiesPath)
+if (-not $path.Equals($approvedPropertiesPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Version bump may edit only the approved root gradle.properties.'
+}
+if (((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'Version properties file is a junction or symlink.'
+}
+$preflight = Join-Path $PSScriptRoot 'ptv-tv-workspace-preflight.ps1'
+& $preflight -Mode Edit
+if ($LASTEXITCODE -ne 0) { throw 'Android TV source Edit preflight denied version bump.' }
+
+$propertyName = "piggietv.version"
 $pattern = "^\s*$([regex]::Escape($propertyName))\s*=\s*v?(?<major>\d{1,2})\.(?<minor>\d{1,2})\.(?<patch>\d{1,2})\s*$"
 
 if (-not (Test-Path -LiteralPath $path)) {
