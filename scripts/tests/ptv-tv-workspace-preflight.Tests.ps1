@@ -58,6 +58,11 @@ Assert-Pass {
     if ((Get-PTVTvGradleMode @(':app:assembleRelease')) -cne 'Package') { throw 'wrong mode' }
 } 'release classified as package'
 Assert-Pass {
+    foreach ($task in @('testBetaUnitTest', 'compileBetaKotlin', 'lintRelease', 'generateBetaResources')) {
+        if ((Get-PTVTvGradleMode @(":app:$task")) -cne 'Package') { throw "$task escaped protected variant policy" }
+    }
+} 'Beta and Release variant tasks require protected policy'
+Assert-Pass {
     if ((Get-PTVTvGradleMode @(':app:installDebug')) -cne 'Install') { throw 'wrong mode' }
 } 'install classified as external action'
 Assert-Pass {
@@ -79,7 +84,7 @@ $policyArgs = @{
     Remote = $remote; ApplicationId = 'com.piggie.tv'; Head = $head
     Tree = $tree; Version = $version
 }
-Assert-Pass { Assert-PTVTvOperationApproval @policyArgs } 'exact clean local package approval'
+Assert-Pass { Assert-PTVTvOperationApproval @policyArgs } 'exact package policy shape'
 Assert-Denied { $c = With-Overrides $policyArgs @{ Policy = $null }; Assert-PTVTvOperationApproval @c } 'missing protected policy'
 Assert-Denied { $c = With-Overrides $policyArgs @{ Head = ('0' * 40) }; Assert-PTVTvOperationApproval @c } 'forged source commit'
 Assert-Denied { $c = With-Overrides $policyArgs @{ Tree = ('0' * 40) }; Assert-PTVTvOperationApproval @c } 'forged source tree'

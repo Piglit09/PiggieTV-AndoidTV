@@ -49,6 +49,9 @@ function Get-PTVTvGradleMode {
     if (@($simple | Where-Object { $_ -match '^(publish|upload|releaseTo)' }).Count -gt 0) {
         return 'Publish'
     }
+    if (@($simple | Where-Object { $_ -cmatch '(Beta|Release)' }).Count -gt 0) {
+        return 'Package'
+    }
     $buildNames = '^(help|tasks|projects|properties|dependencies|dependencyInsight|clean|check|test.*|lint.*|compile.*|generate.*|process.*|merge.*|kapt.*|ksp.*|assembleDebug|assemblePremiumFixture)$'
     if (@($simple | Where-Object { $_ -notmatch $buildNames }).Count -eq 0) { return 'Build' }
     return 'Package'
