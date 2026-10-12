@@ -61,7 +61,7 @@ function Assert-ProtectedRegistryAcl {
 
 function Read-ProtectedPolicy {
     $ancestors = @(
-        'Registry::HKEY_LOCAL_MACHINE',
+        'HKLM:\',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority',
