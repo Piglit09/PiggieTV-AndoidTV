@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import com.piggie.tv.BuildConfig
 import com.piggie.tv.R
+import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.ui.library.LibraryBrowserActivity
 import java.lang.ref.WeakReference
 import java.util.concurrent.CountDownLatch
@@ -29,6 +30,7 @@ class FixtureCardAuditProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
         if (!BuildConfig.DEBUG || !BuildConfig.LOCAL_FIXTURE_ONLY) return false
+        PtvCoilEventListenerFactory.fixtureObserver = FixtureAdaptiveAudit::recordImageEvent
         val application = context?.applicationContext as? Application ?: return false
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
@@ -84,6 +86,10 @@ class FixtureCardAuditProvider : ContentProvider() {
         if (snapshot.invalidTagCount != 0) return status("invalid_card_tag")
         val browser = if (activity is LibraryBrowserActivity) browserScope(activity.intent) else null
         val route = browser?.first ?: snapshot.route ?: return status("unknown_route")
+        val adaptive = if (route == "Home") FixtureAdaptiveAudit.captureStructure(activity.window.decorView)
+                       else null
+        val presentation = if (route == "Home") FixtureAdaptiveAudit.capturePresentation(activity)
+                           else null
         return status("ok").apply {
             putInt("schema", 1)
             putString("package", BuildConfig.APPLICATION_ID)
@@ -93,6 +99,34 @@ class FixtureCardAuditProvider : ContentProvider() {
             putString("libraryId", browser?.second)
             putStringArrayList("itemIds", ArrayList(snapshot.itemIds))
             putString("focusedItemId", snapshot.focusedItemId)
+            if (adaptive != null) {
+                putInt("adaptiveSchema", 1)
+                adaptive.heroViewIdentity?.let { putInt("heroViewIdentity", it) }
+                adaptive.heroItemId?.let { putString("heroItemId", it) }
+                putString("heroBounds", adaptive.heroBounds)
+                adaptive.heroHeight?.let { putInt("heroHeight", it) }
+                adaptive.pageViewIdentity?.let { putInt("pageViewIdentity", it) }
+                adaptive.pageAdapterIdentity?.let { putInt("pageAdapterIdentity", it) }
+                adaptive.pageAdapterItemCount?.let { putInt("pageAdapterItemCount", it) }
+                adaptive.pageFirstVisiblePosition?.let { putInt("pageFirstVisiblePosition", it) }
+                putString("pageBounds", adaptive.pageBounds)
+                putIntArray("visibleRowIdentities", adaptive.visibleRowIdentities.toIntArray())
+                putStringArrayList("visibleRowTitles", ArrayList(adaptive.visibleRowTitles))
+                putStringArrayList("rowBounds", ArrayList(adaptive.rowBounds))
+                putStringArrayList("rowVisibleBounds", ArrayList(adaptive.rowVisibleBounds))
+                putIntArray("visibleCardIdentities", adaptive.visibleCardIdentities.toIntArray())
+                putStringArrayList("visibleCardIds", ArrayList(adaptive.visibleCardIds))
+                putStringArrayList("cardBounds", ArrayList(adaptive.cardBounds))
+                putStringArrayList("cardVisibleBounds", ArrayList(adaptive.cardVisibleBounds))
+                adaptive.focusedViewIdentity?.let { putInt("focusedViewIdentity", it) }
+                putString("focusedAction", adaptive.focusedAction)
+                presentation?.mode?.let { putString("presentationMode", it) }
+                presentation?.animationActive?.let { putBoolean("presentationAnimating", it) }
+                presentation?.generation?.let { putInt("presentationGeneration", it) }
+                FixtureAdaptiveAudit.imageSnapshot().forEach { (event, count) ->
+                    putInt("heroImage_${event}", count)
+                }
+            }
         }
     }
 

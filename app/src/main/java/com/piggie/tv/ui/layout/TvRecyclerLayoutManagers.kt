@@ -27,6 +27,16 @@ class TvLinearLayoutManager(
     orientation: Int,
     reverseLayout: Boolean
 ) : LinearLayoutManager(context, orientation, reverseLayout) {
+    /** Opt-in bottom space for Home's already-loaded row revealed by a compact Hero. */
+    var extraLayoutSpaceAfterPx: Int = 0
+
+    override fun calculateExtraLayoutSpace(state: RecyclerView.State, extraLayoutSpace: IntArray) {
+        super.calculateExtraLayoutSpace(state, extraLayoutSpace)
+        if (orientation == RecyclerView.VERTICAL) {
+            extraLayoutSpace[1] += extraLayoutSpaceAfterPx.coerceAtLeast(0)
+        }
+    }
+
     override fun requestChildRectangleOnScreen(
         parent: RecyclerView,
         child: View,

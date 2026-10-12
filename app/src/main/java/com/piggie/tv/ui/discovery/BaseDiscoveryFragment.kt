@@ -3,6 +3,7 @@ package com.piggie.tv.ui.discovery
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -11,6 +12,7 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
+import com.piggie.tv.BuildConfig
 import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
@@ -31,6 +33,7 @@ import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.theme.PTVShapes
 import com.piggie.tv.ui.hero.HeroCandidate
 import com.piggie.tv.ui.hero.HeroController
+import com.piggie.tv.ui.hero.HeroFocusAction
 import com.piggie.tv.ui.hero.HeroInitialVisibilitySampler
 import com.piggie.tv.ui.hero.HeroRoute
 import com.piggie.tv.ui.hero.HeroRefreshableRoute
@@ -39,6 +42,9 @@ import com.piggie.tv.ui.hero.HeroRowLayoutContract
 import com.piggie.tv.ui.hero.HeroSource
 import com.piggie.tv.ui.hero.HeroState
 import com.piggie.tv.ui.hero.HeroVisibilityPolicy
+import com.piggie.tv.ui.home.HomeHeroCoordinator
+import com.piggie.tv.ui.home.HomeHeroInteractionState
+import com.piggie.tv.ui.home.HomeHeroPresentation
 import com.piggie.tv.ui.layout.TvCardSpacingDecoration
 import com.piggie.tv.ui.layout.TvHorizontalRecyclerView
 import com.piggie.tv.ui.layout.TvLinearLayoutManager
@@ -78,6 +84,9 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
     private var initialHeroVisibilitySampler: HeroInitialVisibilitySampler? = null
     private var pageLoadStartedAt = 0L
     private var routeVisible = false
+    private val homeHeroInteraction = HomeHeroInteractionState(HeroFocusAction.PRIMARY)
+    private var homeHeroCoordinator: HomeHeroCoordinator? = null
+    private val homeInteractiveRowPositions = sortedSetOf<Int>()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -114,9 +123,22 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
             onImageResult = heroController::recordImageResult
         )
         heroRow.render(heroState)
+        if (adaptiveHomeEnabled()) {
+            heroRow.setHomePresentation(homeHeroInteraction.presentation)
+            heroController.setPresentationPaused(
+                homeHeroInteraction.presentation == HomeHeroPresentation.COLLAPSED
+            )
+        }
 
         val manager = TvLinearLayoutManager(requireContext(), RecyclerView.VERTICAL, false)
-        page = RecyclerView(requireContext()).apply {
+        page = object : RecyclerView(requireContext()) {
+            override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
+                if (event != null && adaptiveHomeEnabled() &&
+                    homeHeroCoordinator?.handleKeyEvent(event, findFocus()) == true
+                ) return true
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
             layoutManager = manager
             itemAnimator = null
             setItemViewCacheSize(1)
@@ -145,7 +167,19 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
         // retained slots now, but do not start network work until the route truly resumes.
         routeVisible = false
         viewLifecycleOwner.lifecycle.addObserver(heroController)
+        if (adaptiveHomeEnabled()) {
+            homeHeroCoordinator = HomeHeroCoordinator(
+                page = page,
+                hero = heroRow,
+                heroController = heroController,
+                state = homeHeroInteraction,
+                reduceMotion = { settings.reduceMotion },
+                firstInteractivePosition = { homeInteractiveRowPositions.firstOrNull() },
+                readyRowPositions = { homeInteractiveRowPositions }
+            )
+        }
         loadData()
+        homeHeroCoordinator?.attach()
         initialHeroVisibilitySampler = HeroInitialVisibilitySampler(
             page,
             ::updateHeroVisibility
@@ -159,6 +193,8 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
         discoveryRequest = null
         initialHeroVisibilitySampler?.detach()
         initialHeroVisibilitySampler = null
+        homeHeroCoordinator?.detach()
+        homeHeroCoordinator = null
         shelfCoordinator?.detach()
         shelfCoordinator = null
         heroController.release()
@@ -171,6 +207,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
 
     override fun onPause() {
         routeVisible = false
+        homeHeroCoordinator?.settleForPause()
         discoveryRequest?.cancel()
         discoveryRequest = null
         cancelSupplementalHeroCandidates()
@@ -180,6 +217,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
     override fun onResume() {
         super.onResume()
         routeVisible = true
+        homeHeroCoordinator?.resumeForWarmup()
         if (::pageAdapter.isInitialized && discoveryRequest == null && !destroyed) {
             startDiscoveryRequest()
             loadSupplementalHeroCandidates()
@@ -272,6 +310,7 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
 
     private fun loadData() {
         pageLoadStartedAt = android.os.SystemClock.elapsedRealtime()
+        homeInteractiveRowPositions.clear()
         val manifest = DiscoveryManager.manifest(discoveryPage)
         val browseRequest = DiscoveryLibraryRoutePolicy.browseRequest(discoveryPage)
         pageAdapter = DiscoveryPageAdapter(
@@ -280,9 +319,14 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
             onRetry = { shelfId -> discoveryRequest?.retryShelf(shelfId) },
             bindHeader = { container ->
                 if (browseRequest == null) {
-                    val heroHeight = requireContext().dim(R.dimen.tv_hero_height) +
-                        requireContext().dim(R.dimen.tv_floating_nav_clearance)
-                    HeroRowLayoutContract.bind(container, heroRow, heroHeight)
+                    val coordinator = homeHeroCoordinator
+                    if (coordinator != null) {
+                        coordinator.bindHeader(container)
+                    } else {
+                        val heroHeight = requireContext().dim(R.dimen.tv_hero_height) +
+                            requireContext().dim(R.dimen.tv_floating_nav_clearance)
+                        HeroRowLayoutContract.bind(container, heroRow, heroHeight)
+                    }
                     container.post { heroRow.traceMeasurement(container) }
                 } else {
                     val topClearance = if (discoveryPage == DiscoveryPage.MOVIES) {
@@ -327,6 +371,21 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
                 }
                 val adapterStarted = android.os.SystemClock.elapsedRealtime()
                 pageAdapter.updateShelf(shelf)
+                if (adaptiveHomeEnabled()) {
+                    val adapterPosition = (1 until pageAdapter.itemCount)
+                        .firstOrNull { pageAdapter.shelfIdAt(it) == shelf.definition.id }
+                    if (adapterPosition != null) {
+                        val interactive = when (DiscoveryShelfSlotStatePolicy.resolve(shelf.status)) {
+                            DiscoveryShelfSlotState.CONTENT ->
+                                shelf.items.isNotEmpty() || shelf.viewMoreItem != null
+                            DiscoveryShelfSlotState.ERROR -> true
+                            else -> false
+                        }
+                        if (interactive) homeInteractiveRowPositions.add(adapterPosition)
+                        else homeInteractiveRowPositions.remove(adapterPosition)
+                        homeHeroCoordinator?.onReadyRowsChanged()
+                    }
+                }
                 if (shelf.definition.id != "movies.continue") {
                     libraryCount = if (shelf.status == com.piggie.tv.data.discovery.ShelfStatus.READY ||
                         shelf.status == com.piggie.tv.data.discovery.ShelfStatus.EMPTY
@@ -440,6 +499,9 @@ abstract class BaseDiscoveryFragment : Fragment(), HeroRefreshableRoute, MemoryP
         }
         heroController.updateVisibility(percent, page.computeVerticalScrollOffset())
     }
+
+    private fun adaptiveHomeEnabled(): Boolean =
+        discoveryPage == DiscoveryPage.HOME && BuildConfig.ENABLE_ADAPTIVE_HERO
 
     private fun playHeroItem(item: MediaItem) {
         val origin = if (

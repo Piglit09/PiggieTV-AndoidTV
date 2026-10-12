@@ -3,25 +3,37 @@ package com.piggie.tv.diagnostics
 import android.graphics.drawable.BitmapDrawable
 import android.os.SystemClock
 import coil.EventListener
+import coil.decode.Decoder
 import coil.request.ErrorResult
 import coil.request.ImageRequest
+import coil.request.Options
 import coil.request.SuccessResult
 import coil.size.Dimension
 import coil.size.Size
+import com.piggie.tv.BuildConfig
 
 /**
  * Process-wide Coil accounting. Disabled requests reuse Coil's no-op singleton; enabled requests
  * retain only primitive timing/size state until their terminal callback.
  */
 object PtvCoilEventListenerFactory : EventListener.Factory {
+    /** Installed only by the disposable fixture. Never stores an image or request URL. */
+    @Volatile var fixtureObserver: ((String, String) -> Unit)? = null
     override fun create(request: ImageRequest): EventListener =
-        if (PtvDiagnosticsManager.isEnabled()) {
+        if (PtvDiagnosticsManager.isEnabled() ||
+            (BuildConfig.LOCAL_FIXTURE_ONLY && fixtureObserver != null)) {
             PtvCoilEventListener(
                 request.parameters.value<String>(CATEGORY_PARAMETER) ?: CATEGORY_UNCLASSIFIED
             )
         } else {
             EventListener.NONE
         }
+
+    internal fun observeFixture(category: String, event: String) {
+        if (BuildConfig.LOCAL_FIXTURE_ONLY) {
+            runCatching { fixtureObserver?.invoke(category, event) }
+        }
+    }
 
     const val CATEGORY_PARAMETER = "ptv_image_category"
     const val CATEGORY_HERO = "hero"
@@ -44,8 +56,13 @@ private class PtvCoilEventListener(
     private var completed = false
 
     override fun onStart(request: ImageRequest) {
+        PtvCoilEventListenerFactory.observeFixture(category, "request_start")
         concurrentRequests = PtvDiagnosticsManager.imageStarted()
         if (concurrentRequests > 0) startedAtMs = SystemClock.elapsedRealtime()
+    }
+
+    override fun decodeStart(request: ImageRequest, decoder: Decoder, options: Options) {
+        PtvCoilEventListenerFactory.observeFixture(category, "decode_start")
     }
 
     override fun resolveSizeEnd(request: ImageRequest, size: Size) {
@@ -54,6 +71,14 @@ private class PtvCoilEventListener(
     }
 
     override fun onSuccess(request: ImageRequest, result: SuccessResult) {
+        val source = result.dataSource.name
+        val fixtureEvent = when {
+            source.contains("MEMORY", ignoreCase = true) -> "memory_cache_hit"
+            source.contains("DISK", ignoreCase = true) -> "disk_success"
+            source.contains("NETWORK", ignoreCase = true) -> "network_success"
+            else -> null
+        }
+        fixtureEvent?.let { PtvCoilEventListenerFactory.observeFixture(category, it) }
         val bitmap = (result.drawable as? BitmapDrawable)?.bitmap
         finish(
             bitmapWidth = bitmap?.width,
@@ -68,6 +93,7 @@ private class PtvCoilEventListener(
     }
 
     override fun onError(request: ImageRequest, result: ErrorResult) {
+        PtvCoilEventListenerFactory.observeFixture(category, "error")
         finish(
             bitmapWidth = null,
             bitmapHeight = null,
@@ -79,6 +105,7 @@ private class PtvCoilEventListener(
     }
 
     override fun onCancel(request: ImageRequest) {
+        PtvCoilEventListenerFactory.observeFixture(category, "cancel")
         finish(
             bitmapWidth = null,
             bitmapHeight = null,

@@ -58,6 +58,7 @@ android {
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "true")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "true")
             buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
+            buildConfigField("boolean", "ENABLE_ADAPTIVE_HERO", providers.gradleProperty("ptv.adaptiveHero").orElse("true").get())
         }
         create("premiumFixture") {
             initWith(getByName("debug"))
@@ -74,6 +75,7 @@ android {
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
             buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
+            buildConfigField("boolean", "ENABLE_ADAPTIVE_HERO", "false")
             isDebuggable = false
         }
         release {
@@ -87,6 +89,7 @@ android {
             buildConfigField("boolean", "SHOW_PERFORMANCE_OVERLAY", "false")
             buildConfigField("boolean", "ENABLE_DISCOVERY_FAULT_INJECTION", "false")
             buildConfigField("boolean", "LOCAL_FIXTURE_ONLY", "false")
+            buildConfigField("boolean", "ENABLE_ADAPTIVE_HERO", "false")
         }
     }
 

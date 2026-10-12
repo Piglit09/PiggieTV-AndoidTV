@@ -11,6 +11,13 @@
     <item name="card_artwork" type="id" />
     <item name="focus_artwork_view" type="id" />
     <item name="hero_row" type="id" />
+    <item name="hero_backdrop" type="id" />
+    <item name="hero_logo" type="id" />
+    <item name="hero_title" type="id" />
+    <item name="hero_metadata" type="id" />
+    <item name="hero_overview" type="id" />
+    <item name="hero_primary_action" type="id" />
+    <item name="hero_details_action" type="id" />
     <item name="discovery_shelf_id" type="id" />
     <item name="ptv_discovery_item_id" type="id" />
     <item name="ptv_shows_tab_shows" type="id" />

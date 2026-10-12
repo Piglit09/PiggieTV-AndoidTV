@@ -18,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.view.isVisible
 import coil.dispose
 import coil.imageLoader
 import coil.load
@@ -36,6 +37,7 @@ import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.rendering.TvRenderingProfile
 import com.piggie.tv.ui.layout.TvLayoutProfileResolver
+import com.piggie.tv.ui.home.HomeHeroPresentation
 import com.piggie.tv.ui.shared.TextSanitizer
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
@@ -53,6 +55,7 @@ class HeroRowView(
 ) : FrameLayout(context) {
     private val backdropFloor = if (route == HeroRoute.HOME) PTVColors.cinemaInk else PTVColors.background
     private val backdrop = ImageView(context).apply {
+        id = R.id.hero_backdrop
         scaleType = ImageView.ScaleType.CENTER_CROP
         setBackgroundColor(backdropFloor)
     }
@@ -66,10 +69,12 @@ class HeroRowView(
         visibility = View.VISIBLE
     }
     private val logo = ImageView(context).apply {
+        id = R.id.hero_logo
         scaleType = ImageView.ScaleType.FIT_START
         adjustViewBounds = true
     }
     private val title = TextView(context).apply {
+        id = R.id.hero_title
         setTextSizeRes(R.dimen.tv_text_size_hero_title)
         setTextColor(PTVColors.textPrimary)
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -77,19 +82,24 @@ class HeroRowView(
         ellipsize = TextUtils.TruncateAt.END
     }
     private val metadata = TextView(context).apply {
+        id = R.id.hero_metadata
         setTextSizeRes(R.dimen.tv_text_size_hero_meta)
         setTextColor(PTVColors.textSecondary)
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
     private val overview = TextView(context).apply {
+        id = R.id.hero_overview
         setTextSizeRes(R.dimen.tv_text_size_hero_body)
         setTextColor(PTVColors.textSecondary)
         maxLines = resources.getInteger(R.integer.tv_hero_overview_max_lines)
         ellipsize = TextUtils.TruncateAt.END
     }
-    private val primary = heroButton(primary = true)
-    private val details = heroButton(primary = false).apply { text = "Details" }
+    private val primary = heroButton(primary = true).apply { id = R.id.hero_primary_action }
+    private val details = heroButton(primary = false).apply {
+        id = R.id.hero_details_action
+        text = "Details"
+    }
     private lateinit var content: LinearLayout
     private lateinit var actions: LinearLayout
     private var current: HeroCandidate? = null
@@ -102,6 +112,7 @@ class HeroRowView(
     private var activeLogoCacheKey: String? = null
     private var preloadedBackdropKey: String? = null
     private var lastMeasurementSignature: String? = null
+    private var homePresentation: HomeHeroPresentation? = null
     private val useStaticCornerMask = HeroRoundingPolicy.useStaticCornerMask(
         profile = TvRenderingRuntime.profile(),
         opaqueRoot = TvRenderingRuntime.features().opaqueRoots
@@ -138,6 +149,9 @@ class HeroRowView(
         content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.START
+            // Focused actions can extend beyond their row and this content padding.
+            clipChildren = false
+            clipToPadding = false
             setPadding(
                 context.dim(R.dimen.tv_screen_margin_horizontal),
                 context.dim(R.dimen.tv_spacing_large) +
@@ -170,6 +184,9 @@ class HeroRowView(
         )
         actions = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            // The 1.04x focus treatment extends beyond this row's last button bounds.
+            clipChildren = false
+            clipToPadding = false
             setPadding(0, context.dim(R.dimen.tv_spacing_medium), 0, 0)
             addView(
                 primary,
@@ -388,6 +405,81 @@ class HeroRowView(
 
         loadBackdrop(candidate)
         preload(state.next)
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        positionHomeActions()
+    }
+
+    /** Changes only Home composition; artwork and action views retain their identity. */
+    fun setHomePresentation(presentation: HomeHeroPresentation) {
+        if (route != HeroRoute.HOME || homePresentation == presentation) return
+        homePresentation = presentation
+        val horizontal = context.dim(R.dimen.tv_screen_margin_horizontal)
+        val clearance = context.dim(R.dimen.tv_floating_nav_clearance)
+        // A vertical LinearLayout gives unspecified children MATCH_PARENT width. Keep the
+        // title inside the identity column so its focus-neighbor bounds never overlap actions.
+        (title.layoutParams as LinearLayout.LayoutParams).apply {
+            width = context.dim(R.dimen.tv_hero_content_width)
+            title.layoutParams = this
+        }
+        (actions.layoutParams as LinearLayout.LayoutParams).apply {
+            width = LayoutParams.WRAP_CONTENT
+            actions.layoutParams = this
+        }
+        if (presentation == HomeHeroPresentation.COLLAPSED) {
+            content.gravity = Gravity.START or Gravity.TOP
+            content.setPadding(horizontal, clearance + context.dim(R.dimen.tv_spacing_small), horizontal, 0)
+            overview.visibility = View.GONE
+        } else {
+            content.gravity = Gravity.START or Gravity.BOTTOM
+            content.setPadding(
+                horizontal,
+                clearance + context.dim(R.dimen.tv_spacing_large),
+                horizontal,
+                context.dim(R.dimen.tv_spacing_large)
+            )
+            overview.visibility = View.VISIBLE
+        }
+        requestLayout()
+    }
+
+    fun homeActionFor(view: View?): HeroFocusAction? = if (route == HeroRoute.HOME) {
+        when (view) {
+            primary -> HeroFocusAction.PRIMARY
+            details -> HeroFocusAction.DETAILS
+            else -> null
+        }
+    } else null
+
+    fun requestHomeActionFocus(action: HeroFocusAction): Boolean {
+        if (!homeActionsAvailable()) return false
+        return when (action) {
+            HeroFocusAction.PRIMARY -> primary.requestFocus()
+            HeroFocusAction.DETAILS -> details.requestFocus()
+        }
+    }
+
+    fun homeActionsAvailable(): Boolean =
+        route == HeroRoute.HOME && current != null &&
+            primary.isVisible && details.isVisible
+
+    private fun positionHomeActions() {
+        if (route != HeroRoute.HOME || homePresentation != HomeHeroPresentation.COLLAPSED) return
+        // Relayout the already mounted child so DPAD focus bounds match visible controls.
+        // The parent and both action views retain identity through every transition.
+        val actionLeft = (width - content.paddingRight - actions.width)
+            .coerceAtLeast(content.paddingLeft)
+        val identity = if (logo.isVisible) logo else title
+        val actionTop = ((identity.top + metadata.bottom - actions.height) / 2f)
+            .toInt().coerceAtLeast(0)
+        actions.layout(
+            actionLeft,
+            actionTop,
+            actionLeft + actions.width,
+            actionTop + actions.height
+        )
     }
 
     override fun onDetachedFromWindow() {
