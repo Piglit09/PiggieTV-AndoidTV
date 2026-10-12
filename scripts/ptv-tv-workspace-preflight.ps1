@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ptv-tv-workspace-rules.ps1')
 
 $approvedRoot = 'C:\Users\Piggie\Documents\GitHub\PiggieTV-AndoidTV'
-$policyKey = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority\AndroidTV'
+$policySubKey = 'SOFTWARE\PiggieTV\WorkspaceAuthority\AndroidTV'
 
 function Assert-NoReparseAncestor {
     param([string]$Path)
@@ -35,10 +35,8 @@ function Invoke-GitRead {
 }
 
 function Assert-ProtectedRegistryAcl {
-    param([string]$Path)
-    # Windows PowerShell 5.1 cannot resolve Registry provider keys via Get-Acl
-    # -LiteralPath, even though Test-Path -LiteralPath succeeds for the same key.
-    $acl = Get-Acl -Path $Path
+    param([Microsoft.Win32.RegistryKey]$Key, [string]$Path)
+    $acl = $Key.GetAccessControl()
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
@@ -62,20 +60,34 @@ function Assert-ProtectedRegistryAcl {
 }
 
 function Read-ProtectedPolicy {
-    $ancestors = @(
-        'HKLM:\',
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE',
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV',
-        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority',
-        $policyKey
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64
     )
-    foreach ($path in $ancestors) {
-        if (-not (Test-Path -LiteralPath $path)) { throw "Operator policy is absent: $path" }
-        Assert-ProtectedRegistryAcl $path
+    try {
+        Assert-ProtectedRegistryAcl -Key $baseKey -Path 'HKLM'
+        $ancestors = @(
+            'SOFTWARE',
+            'SOFTWARE\PiggieTV',
+            'SOFTWARE\PiggieTV\WorkspaceAuthority',
+            $policySubKey
+        )
+        $raw = $null
+        foreach ($path in $ancestors) {
+            $key = $baseKey.OpenSubKey($path, $false)
+            if ($null -eq $key) { throw "Operator policy is absent: HKLM\$path" }
+            try {
+                Assert-ProtectedRegistryAcl -Key $key -Path "HKLM\$path"
+                if ($path -ceq $policySubKey) { $raw = $key.GetValue('PolicyJson', $null) }
+            } finally {
+                $key.Dispose()
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$raw)) { throw 'Operator policy is empty.' }
+        return ($raw | ConvertFrom-Json)
+    } finally {
+        $baseKey.Dispose()
     }
-    $raw = (Get-ItemProperty -LiteralPath $policyKey -Name PolicyJson -ErrorAction Stop).PolicyJson
-    if ([string]::IsNullOrWhiteSpace([string]$raw)) { throw 'Operator policy is empty.' }
-    return ($raw | ConvertFrom-Json)
 }
 
 try {
