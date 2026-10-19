@@ -107,8 +107,7 @@ Assert-Denied {
     $c = With-Overrides $policyArgs @{ Policy = $bad }; Assert-PTVTvOperationApproval @c
 } 'package policy cannot name a device'
 
-# Shared-v2 fixtures use real source paths; non-TV app identities are structural
-# placeholders because each project's own guard validates its exact identity.
+# Shared-v2 fixtures use the current cross-project identity and version formats.
 $webOsRoot = 'C:\Users\Piggie\Documents\GitHub\PiggieTV-WebOS'
 $mobileRoot = 'C:\Users\Piggie\Documents\GitHub\PiggieTV-Android'
 $shared = [pscustomobject]@{
@@ -127,22 +126,28 @@ $shared = [pscustomobject]@{
             projectId = 'PTV_WEBOS'; state = 'ACTIVE'; sourceRoot = $webOsRoot
             gitCommonDir = (Join-Path $webOsRoot '.git')
             remote = 'https://github.com/Piglit09/PiggieTV-WebOS.git'
-            applicationId = 'fixture.webos'; versionSource = (Join-Path $webOsRoot 'package.json')
-            artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\webOS')
+            applicationId = 'com.piggietv.webosnative'; versionSource = 'appinfo.json'
+            artifactRoots = @((Join-Path $webOsRoot 'dist'))
             allowedModes = @('Edit', 'Build'); packageEnabled = $false; externalOperations = @()
         }
         [pscustomobject]@{
             projectId = 'PTV_ANDROID_MOBILE'; state = 'ACTIVE'; sourceRoot = $mobileRoot
             gitCommonDir = (Join-Path $mobileRoot '.git')
             remote = 'https://github.com/Piglit09/PiggieTV-Andoid.git'
-            applicationId = 'fixture.mobile'; versionSource = (Join-Path $mobileRoot 'gradle.properties')
+            applicationId = 'com.piggietv.android'; versionSource = 'gradle.properties:piggietv.version'
             artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-Mobile')
             allowedModes = @('Edit', 'Build'); packageEnabled = $false; externalOperations = @()
         }
     )
     approvals = @()
 }
-function Copy-SharedFixture { return ($shared | ConvertTo-Json -Depth 10 | ConvertFrom-Json) }
+function Copy-SharedFixture {
+    $json = $shared | ConvertTo-Json -Depth 10
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+        return ($json | ConvertFrom-Json -DateKind String)
+    }
+    return ($json | ConvertFrom-Json)
+}
 $sharedArgs = @{
     SharedPolicy = $shared; ChildPolicy = $null; MinimumSchemaVersion = 2
     Mode = 'Build'; Root = $root; CommonDirectory = $common; Remote = $remote
@@ -153,6 +158,16 @@ Assert-Pass {
     $c = With-Overrides $sharedArgs @{ SharedPolicy = (Copy-SharedFixture) }
     $null = Assert-PTVTvSharedPolicy @c
 } 'JSON-decoded shared-v2 TV build approval'
+Assert-Pass {
+    $v2 = Copy-SharedFixture; $v2.schemaVersion = [long]2
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $v2 }
+    $null = Assert-PTVTvSharedPolicy @c
+} '64-bit JSON integer schema version accepted'
+Assert-Denied {
+    $v2 = Copy-SharedFixture; $v2.schemaVersion = '2'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $v2 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'text schema version rejected'
 Assert-Pass {
     $c = With-Overrides $sharedArgs @{ Mode = 'Edit' }
     $null = Assert-PTVTvSharedPolicy @c
@@ -237,6 +252,22 @@ Assert-Denied {
     $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
     $null = Assert-PTVTvSharedPolicy @c
 } 'shared-v2 TV version source mismatch rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture
+    $bad.projects[1].artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Other')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV artifact root mismatch rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[2].versionSource = ''
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'other active project still needs a version source'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[2].artifactRoots = @('dist')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'other active project still needs an absolute artifact root'
 Assert-Denied {
     $bad = Copy-SharedFixture; $bad.projects[1].allowedModes = @('Build', 'Package')
     $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }

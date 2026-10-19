@@ -131,7 +131,8 @@ function Assert-PTVTvSharedPolicy {
         if ($SharedPolicy -isnot [pscustomobject]) { throw 'Shared policy must be an object.' }
         $schema = $SharedPolicy.PSObject.Properties['schemaVersion']
         if ($null -ne $schema) {
-            if ($schema.Value -isnot [int] -or $schema.Value -ne 2) {
+            if (($schema.Value -isnot [int] -and $schema.Value -isnot [long]) -or
+                $schema.Value -ne 2) {
                 throw 'Shared policy schema is unsupported.'
             }
             $sharedIsV2 = $true
@@ -192,12 +193,17 @@ function Assert-PTVTvSharedPolicy {
             'allowedModes', 'packageEnabled', 'externalOperations') 'ACTIVE project'
         $projectRoot = Normalize-PTVTvPolicyPath $project.sourceRoot 'Shared source root'
         $projectCommon = Normalize-PTVTvPolicyPath $project.gitCommonDir 'Shared Git common directory'
-        $projectVersionSource = Normalize-PTVTvPolicyPath $project.versionSource 'Shared version source'
+        Assert-PTVTvPolicyString $project.versionSource 'Shared version source'
+        $projectVersionSource = $null
+        if ($project.projectId -ceq 'PTV_ANDROID_TV') {
+            $projectVersionSource = Normalize-PTVTvPolicyPath $project.versionSource 'Shared TV version source'
+        }
         if (-not $projectCommon.Equals((Join-Path $projectRoot '.git'),
             [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Shared Git common directory must be the project .git directory.'
         }
-        if (-not $projectVersionSource.StartsWith($projectRoot + '\',
+        if ($null -ne $projectVersionSource -and
+            -not $projectVersionSource.StartsWith($projectRoot + '\',
             [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Shared version source is outside its project.'
         }
@@ -209,9 +215,8 @@ function Assert-PTVTvSharedPolicy {
         $artifactSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($artifactRoot in $project.artifactRoots) {
             $artifact = Normalize-PTVTvPolicyPath $artifactRoot 'Shared artifact root'
-            if (-not $artifact.StartsWith('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\',
-                [StringComparison]::OrdinalIgnoreCase) -or -not $artifactSet.Add($artifact)) {
-                throw 'Shared artifact root is unapproved or duplicated.'
+            if (-not $artifactSet.Add($artifact)) {
+                throw 'Shared artifact root is duplicated.'
             }
         }
         if ($project.allowedModes -isnot [array]) { throw 'Shared allowed modes must be an array.' }
@@ -235,7 +240,9 @@ function Assert-PTVTvSharedPolicy {
         }
         Assert-PTVTvPolicyExistingPath $projectRoot 'Container' 'Shared source root'
         Assert-PTVTvPolicyExistingPath $projectCommon 'Container' 'Shared Git common directory'
-        Assert-PTVTvPolicyExistingPath $projectVersionSource 'Leaf' 'Shared version source'
+        if ($null -ne $projectVersionSource) {
+            Assert-PTVTvPolicyExistingPath $projectVersionSource 'Leaf' 'Shared TV version source'
+        }
         $activeRoots.Add($projectRoot)
         if ($project.projectId -ceq 'PTV_ANDROID_TV') { $tvRecord = $project }
     }
