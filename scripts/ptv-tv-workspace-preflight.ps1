@@ -59,32 +59,60 @@ function Assert-ProtectedRegistryAcl {
     }
 }
 
-function Read-ProtectedPolicy {
+function Read-ProtectedPolicySnapshot {
     $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
         [Microsoft.Win32.RegistryHive]::LocalMachine,
         [Microsoft.Win32.RegistryView]::Registry64
     )
     try {
         Assert-ProtectedRegistryAcl -Key $baseKey -Path 'HKLM'
-        $ancestors = @(
-            'SOFTWARE',
-            'SOFTWARE\PiggieTV',
-            'SOFTWARE\PiggieTV\WorkspaceAuthority',
-            $policySubKey
-        )
-        $raw = $null
-        foreach ($path in $ancestors) {
+        $snapshot = [pscustomobject]@{
+            SharedPolicy = $null
+            ChildPolicy = $null
+            MinimumSchemaVersion = $null
+        }
+        foreach ($path in @('SOFTWARE', 'SOFTWARE\PiggieTV',
+            'SOFTWARE\PiggieTV\WorkspaceAuthority', $policySubKey)) {
             $key = $baseKey.OpenSubKey($path, $false)
-            if ($null -eq $key) { throw "Operator policy is absent: HKLM\$path" }
+            if ($null -eq $key) { break }
             try {
                 Assert-ProtectedRegistryAcl -Key $key -Path "HKLM\$path"
-                if ($path -ceq $policySubKey) { $raw = $key.GetValue('PolicyJson', $null) }
+                if ($path -ceq 'SOFTWARE\PiggieTV\WorkspaceAuthority') {
+                    if (@($key.GetValueNames()) -contains 'MinimumSchemaVersion') {
+                        if ($key.GetValueKind('MinimumSchemaVersion') -ne
+                            [Microsoft.Win32.RegistryValueKind]::DWord) {
+                            throw 'Protected minimum schema marker must be a DWORD.'
+                        }
+                        $snapshot.MinimumSchemaVersion = $key.GetValue('MinimumSchemaVersion', $null)
+                    }
+                    if (@($key.GetValueNames()) -contains 'PolicyJson') {
+                        if ($key.GetValueKind('PolicyJson') -ne
+                            [Microsoft.Win32.RegistryValueKind]::String) {
+                            throw 'Shared operator policy must be a REG_SZ value.'
+                        }
+                        $raw = $key.GetValue('PolicyJson', $null)
+                        if ([string]::IsNullOrWhiteSpace([string]$raw)) {
+                            throw 'Shared operator policy is empty.'
+                        }
+                        $snapshot.SharedPolicy = $raw | ConvertFrom-Json
+                    }
+                }
+                if ($path -ceq $policySubKey -and @($key.GetValueNames()) -contains 'PolicyJson') {
+                    if ($key.GetValueKind('PolicyJson') -ne
+                        [Microsoft.Win32.RegistryValueKind]::String) {
+                        throw 'TV child operator policy must be a REG_SZ value.'
+                    }
+                    $raw = $key.GetValue('PolicyJson', $null)
+                    if ([string]::IsNullOrWhiteSpace([string]$raw)) {
+                        throw 'TV child operator policy is empty.'
+                    }
+                    $snapshot.ChildPolicy = $raw | ConvertFrom-Json
+                }
             } finally {
                 $key.Dispose()
             }
         }
-        if ([string]::IsNullOrWhiteSpace([string]$raw)) { throw 'Operator policy is empty.' }
-        return ($raw | ConvertFrom-Json)
+        return $snapshot
     } finally {
         $baseKey.Dispose()
     }
@@ -163,9 +191,23 @@ try {
     if ($Mode -in @('Install', 'Publish')) {
         throw 'Device installation and publication require a separate implementation and exact operator approval.'
     }
+    if ($Mode -eq 'Package' -and $dirtyPaths -ne 0) {
+        throw 'Release packaging requires clean committed source.'
+    }
+    $policySnapshot = Read-ProtectedPolicySnapshot
+    $sharedArgs = @{
+        SharedPolicy = $policySnapshot.SharedPolicy
+        ChildPolicy = $policySnapshot.ChildPolicy
+        MinimumSchemaVersion = $policySnapshot.MinimumSchemaVersion
+        Mode = $Mode
+        Root = $actualRoot
+        CommonDirectory = $commonDirectory
+        Remote = $remote
+        ApplicationId = 'com.piggie.tv'
+    }
+    Assert-PTVTvSharedPolicy @sharedArgs
     if ($Mode -eq 'Package') {
-        if ($dirtyPaths -ne 0) { throw 'Release packaging requires clean committed source.' }
-        $policy = Read-ProtectedPolicy
+        $policy = $policySnapshot.ChildPolicy
         Assert-PTVTvOperationApproval -Policy $policy -Mode $Mode -Root $actualRoot `
             -CommonDirectory $commonDirectory -Remote $remote -ApplicationId 'com.piggie.tv' `
             -Head $head -Tree $tree -Version $version

@@ -57,6 +57,208 @@ function Get-PTVTvGradleMode {
     return 'Package'
 }
 
+function Assert-PTVTvPolicyFields {
+    param($Value, [string[]]$Names, [string]$Label)
+    if ($null -eq $Value -or $Value -isnot [pscustomobject]) { throw "$Label must be an object." }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { throw "$Label has missing or unsupported fields." }
+    foreach ($name in $actual) {
+        if ($Names -cnotcontains $name) { throw "$Label has an unsupported field: $name" }
+    }
+}
+
+function Assert-PTVTvPolicyString {
+    param($Value, [string]$Label)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or
+        $Value -cne $Value.Trim()) {
+        throw "$Label must be a nonempty string without surrounding whitespace."
+    }
+}
+
+function Normalize-PTVTvPolicyPath {
+    param($Path, [string]$Label)
+    Assert-PTVTvPolicyString $Path $Label
+    if ($Path -cnotmatch '^[A-Za-z]:\\') { throw "$Label must be a fully qualified drive path." }
+    $normalized = Normalize-PTVTvPath $Path
+    if (-not $Path.TrimEnd([char[]]@('\', '/')).Equals($normalized,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label uses a noncanonical path."
+    }
+    return $normalized
+}
+
+function Assert-PTVTvPolicyExistingPath {
+    param([string]$Path, [string]$Kind, [string]$Label)
+    if (-not (Test-Path -LiteralPath $Path -PathType $Kind)) {
+        throw "$Label is absent."
+    }
+    $entry = Get-Item -LiteralPath $Path -Force
+    while ($null -ne $entry) {
+        if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label uses a junction or symlink."
+        }
+        $entry = [IO.Directory]::GetParent($entry.FullName)
+    }
+}
+
+function Assert-PTVTvPolicyTime {
+    param($Value, [string]$Label)
+    Assert-PTVTvPolicyString $Value $Label
+    if ($Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') {
+        throw "$Label must be a UTC timestamp."
+    }
+    try { return [DateTimeOffset]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture) }
+    catch { throw "$Label is invalid." }
+}
+
+function Assert-PTVTvSharedPolicy {
+    param(
+        $SharedPolicy,
+        $ChildPolicy,
+        $MinimumSchemaVersion,
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$CommonDirectory,
+        [Parameter(Mandatory = $true)][string]$Remote,
+        [Parameter(Mandatory = $true)][string]$ApplicationId
+    )
+    if ($null -ne $MinimumSchemaVersion -and
+        ($MinimumSchemaVersion -isnot [int] -or $MinimumSchemaVersion -lt 0)) {
+        throw 'Protected minimum schema version is invalid.'
+    }
+    $sharedIsV2 = $false
+    if ($null -ne $SharedPolicy) {
+        if ($SharedPolicy -isnot [pscustomobject]) { throw 'Shared policy must be an object.' }
+        $schema = $SharedPolicy.PSObject.Properties['schemaVersion']
+        if ($null -ne $schema) {
+            if ($schema.Value -isnot [int] -or $schema.Value -ne 2) {
+                throw 'Shared policy schema is unsupported.'
+            }
+            $sharedIsV2 = $true
+        } elseif ($SharedPolicy.PSObject.Properties['projectId'] -eq $null -or
+            $SharedPolicy.projectId -cne 'PTV_WEBOS') {
+            throw 'Unversioned shared policy is not Android TV authority.'
+        }
+    }
+    if ($null -ne $MinimumSchemaVersion -and $MinimumSchemaVersion -ge 2 -and
+        ($MinimumSchemaVersion -gt 2 -or -not $sharedIsV2)) {
+        throw 'Protected minimum schema requires a supported shared policy.'
+    }
+    if (-not $sharedIsV2) { return }
+    if ($null -ne $ChildPolicy) { throw 'TV child and shared policy authorities are ambiguous.' }
+
+    Assert-PTVTvPolicyFields $SharedPolicy @('schemaVersion', 'policyId', 'issuedUtc',
+        'expiresUtc', 'projects', 'approvals') 'Shared policy'
+    Assert-PTVTvPolicyString $SharedPolicy.policyId 'Shared policy ID'
+    $issued = Assert-PTVTvPolicyTime $SharedPolicy.issuedUtc 'Shared policy issue time'
+    $expires = Assert-PTVTvPolicyTime $SharedPolicy.expiresUtc 'Shared policy expiry'
+    $now = [DateTimeOffset]::UtcNow
+    if ($issued -gt $now -or $expires -le $now -or $expires -le $issued) {
+        throw 'Shared policy is unissued, expired, or has an invalid time range.'
+    }
+    # Privileged approval records need a separate reviewed contract and implementation.
+    if ($SharedPolicy.approvals -isnot [array] -or $SharedPolicy.approvals.Count -ne 0) {
+        throw 'Shared policy approvals are disabled in this build-only adapter.'
+    }
+    if ($SharedPolicy.projects -isnot [array] -or $SharedPolicy.projects.Count -ne 4) {
+        throw 'Shared policy must contain exactly four project records.'
+    }
+
+    $allowedIds = @('PTV_WEB', 'PTV_ANDROID_TV', 'PTV_WEBOS', 'PTV_ANDROID_MOBILE')
+    $seenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $activeRoots = [Collections.Generic.List[string]]::new()
+    $tvRecord = $null
+    foreach ($project in $SharedPolicy.projects) {
+        if ($null -eq $project -or $project -isnot [pscustomobject]) {
+            throw 'Shared project record must be an object.'
+        }
+        Assert-PTVTvPolicyString $project.projectId 'Shared project ID'
+        if ($allowedIds -cnotcontains $project.projectId -or -not $seenIds.Add($project.projectId)) {
+            throw 'Shared policy has an unknown or duplicate project ID.'
+        }
+        if ($project.state -ceq 'HOLD') {
+            Assert-PTVTvPolicyFields $project @('projectId', 'state', 'reason') 'HOLD project'
+            Assert-PTVTvPolicyString $project.reason 'HOLD reason'
+            if ($project.projectId -ceq 'PTV_ANDROID_TV') {
+                throw 'Android TV is on hold in shared policy.'
+            }
+            continue
+        }
+        if ($project.state -cne 'ACTIVE' -or $project.projectId -ceq 'PTV_WEB') {
+            throw 'Shared project state is unsupported.'
+        }
+        Assert-PTVTvPolicyFields $project @('projectId', 'state', 'sourceRoot',
+            'gitCommonDir', 'remote', 'applicationId', 'versionSource', 'artifactRoots',
+            'allowedModes', 'packageEnabled', 'externalOperations') 'ACTIVE project'
+        $projectRoot = Normalize-PTVTvPolicyPath $project.sourceRoot 'Shared source root'
+        $projectCommon = Normalize-PTVTvPolicyPath $project.gitCommonDir 'Shared Git common directory'
+        $projectVersionSource = Normalize-PTVTvPolicyPath $project.versionSource 'Shared version source'
+        if (-not $projectCommon.Equals((Join-Path $projectRoot '.git'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Shared Git common directory must be the project .git directory.'
+        }
+        if (-not $projectVersionSource.StartsWith($projectRoot + '\',
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Shared version source is outside its project.'
+        }
+        Assert-PTVTvPolicyString $project.remote 'Shared remote'
+        Assert-PTVTvPolicyString $project.applicationId 'Shared application ID'
+        if ($project.artifactRoots -isnot [array] -or $project.artifactRoots.Count -eq 0) {
+            throw 'Shared artifact roots must be a nonempty array.'
+        }
+        $artifactSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($artifactRoot in $project.artifactRoots) {
+            $artifact = Normalize-PTVTvPolicyPath $artifactRoot 'Shared artifact root'
+            if (-not $artifact.StartsWith('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\',
+                [StringComparison]::OrdinalIgnoreCase) -or -not $artifactSet.Add($artifact)) {
+                throw 'Shared artifact root is unapproved or duplicated.'
+            }
+        }
+        if ($project.allowedModes -isnot [array]) { throw 'Shared allowed modes must be an array.' }
+        $modeSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($allowedMode in $project.allowedModes) {
+            if ($allowedMode -isnot [string] -or $allowedMode -cnotin @('Edit', 'Build') -or
+                -not $modeSet.Add($allowedMode)) {
+                throw 'Shared policy has an unsupported or duplicate mode.'
+            }
+        }
+        if ($project.packageEnabled -isnot [bool] -or $project.packageEnabled -or
+            $project.externalOperations -isnot [array] -or $project.externalOperations.Count -ne 0) {
+            throw 'Shared privileged operations are disabled in this build-only adapter.'
+        }
+        foreach ($priorRoot in $activeRoots) {
+            if ($projectRoot.Equals($priorRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $projectRoot.StartsWith($priorRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+                $priorRoot.StartsWith($projectRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Shared active source roots overlap.'
+            }
+        }
+        Assert-PTVTvPolicyExistingPath $projectRoot 'Container' 'Shared source root'
+        Assert-PTVTvPolicyExistingPath $projectCommon 'Container' 'Shared Git common directory'
+        Assert-PTVTvPolicyExistingPath $projectVersionSource 'Leaf' 'Shared version source'
+        $activeRoots.Add($projectRoot)
+        if ($project.projectId -ceq 'PTV_ANDROID_TV') { $tvRecord = $project }
+    }
+    foreach ($requiredId in $allowedIds) {
+        if (-not $seenIds.Contains($requiredId)) { throw 'Shared project identity is missing.' }
+    }
+    if ($null -eq $tvRecord) { throw 'Shared Android TV record is absent.' }
+    Assert-PTVTvEqualPath $tvRecord.sourceRoot $Root 'Shared TV source root'
+    Assert-PTVTvEqualPath $tvRecord.gitCommonDir $CommonDirectory 'Shared TV Git common directory'
+    Assert-PTVTvEqualPath $tvRecord.versionSource (Join-Path $Root 'gradle.properties') 'Shared TV version source'
+    if ($tvRecord.remote -cne $Remote -or $tvRecord.applicationId -cne $ApplicationId) {
+        throw 'Shared Android TV repository or application differs.'
+    }
+    if ($tvRecord.artifactRoots.Count -ne 1) {
+        throw 'Shared Android TV artifact root is ambiguous.'
+    }
+    Assert-PTVTvEqualPath $tvRecord.artifactRoots[0] `
+        'C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-TV' 'Shared TV artifact root'
+    if ($Mode -cnotin @('Edit', 'Build') -or $tvRecord.allowedModes -cnotcontains $Mode) {
+        throw 'Shared Android TV operation is not authorized.'
+    }
+}
+
 function Assert-PTVTvOperationApproval {
     param(
         $Policy,

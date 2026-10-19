@@ -107,6 +107,167 @@ Assert-Denied {
     $c = With-Overrides $policyArgs @{ Policy = $bad }; Assert-PTVTvOperationApproval @c
 } 'package policy cannot name a device'
 
+# Shared-v2 fixtures use real source paths; non-TV app identities are structural
+# placeholders because each project's own guard validates its exact identity.
+$webOsRoot = 'C:\Users\Piggie\Documents\GitHub\PiggieTV-WebOS'
+$mobileRoot = 'C:\Users\Piggie\Documents\GitHub\PiggieTV-Android'
+$shared = [pscustomobject]@{
+    schemaVersion = 2; policyId = 'tv-shared-fixture'
+    issuedUtc = '2026-01-01T00:00:00Z'; expiresUtc = '2099-01-01T00:00:00Z'
+    projects = @(
+        [pscustomobject]@{ projectId = 'PTV_WEB'; state = 'HOLD'; reason = 'separate review required' }
+        [pscustomobject]@{
+            projectId = 'PTV_ANDROID_TV'; state = 'ACTIVE'; sourceRoot = $root
+            gitCommonDir = $common; remote = $remote; applicationId = 'com.piggie.tv'
+            versionSource = (Join-Path $root 'gradle.properties')
+            artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-TV')
+            allowedModes = @('Edit', 'Build'); packageEnabled = $false; externalOperations = @()
+        }
+        [pscustomobject]@{
+            projectId = 'PTV_WEBOS'; state = 'ACTIVE'; sourceRoot = $webOsRoot
+            gitCommonDir = (Join-Path $webOsRoot '.git')
+            remote = 'https://github.com/Piglit09/PiggieTV-WebOS.git'
+            applicationId = 'fixture.webos'; versionSource = (Join-Path $webOsRoot 'package.json')
+            artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\webOS')
+            allowedModes = @('Edit', 'Build'); packageEnabled = $false; externalOperations = @()
+        }
+        [pscustomobject]@{
+            projectId = 'PTV_ANDROID_MOBILE'; state = 'ACTIVE'; sourceRoot = $mobileRoot
+            gitCommonDir = (Join-Path $mobileRoot '.git')
+            remote = 'https://github.com/Piglit09/PiggieTV-Andoid.git'
+            applicationId = 'fixture.mobile'; versionSource = (Join-Path $mobileRoot 'gradle.properties')
+            artifactRoots = @('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-Mobile')
+            allowedModes = @('Edit', 'Build'); packageEnabled = $false; externalOperations = @()
+        }
+    )
+    approvals = @()
+}
+function Copy-SharedFixture { return ($shared | ConvertTo-Json -Depth 10 | ConvertFrom-Json) }
+$sharedArgs = @{
+    SharedPolicy = $shared; ChildPolicy = $null; MinimumSchemaVersion = 2
+    Mode = 'Build'; Root = $root; CommonDirectory = $common; Remote = $remote
+    ApplicationId = 'com.piggie.tv'
+}
+Assert-Pass { $null = Assert-PTVTvSharedPolicy @sharedArgs } 'exact shared-v2 TV build approval'
+Assert-Pass {
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = (Copy-SharedFixture) }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'JSON-decoded shared-v2 TV build approval'
+Assert-Pass {
+    $c = With-Overrides $sharedArgs @{ Mode = 'Edit' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'exact shared-v2 TV edit approval'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ Mode = 'Package' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 build policy cannot authorize TV package'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ Mode = 'Install' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 build policy cannot authorize TV device action'
+Assert-Pass {
+    $c = With-Overrides $sharedArgs @{
+        SharedPolicy = [pscustomobject]@{ projectId = 'PTV_WEBOS' }
+        MinimumSchemaVersion = $null
+    }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'legacy webOS parent does not replace TV local build authority'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{
+        SharedPolicy = [pscustomobject]@{ projectId = 'PTV_WEBOS' }
+    }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'protected v2 floor rejects legacy parent'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $null }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'protected v2 floor rejects missing shared policy'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ MinimumSchemaVersion = 3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'higher protected schema floor rejects v2'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ ChildPolicy = $policy }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 and TV child policy cannot combine'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[3].projectId = 'PTV_ANDROID_TV'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'duplicate project identity rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[3].projectId = 'PTV_UNKNOWN'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'unknown project identity rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture
+    $nested = Join-Path $root 'nested'
+    $bad.projects[3].sourceRoot = $nested
+    $bad.projects[3].gitCommonDir = (Join-Path $nested '.git')
+    $bad.projects[3].versionSource = (Join-Path $nested 'gradle.properties')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'overlapping active roots rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture
+    $missing = 'C:\PTV-Missing-Source-Root-Fixture'
+    $bad.projects[3].sourceRoot = $missing
+    $bad.projects[3].gitCommonDir = (Join-Path $missing '.git')
+    $bad.projects[3].versionSource = (Join-Path $missing 'gradle.properties')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'missing active source root rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].remote = 'https://example.invalid/other.git'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV remote mismatch rejected'
+Assert-Denied {
+    $c = With-Overrides $sharedArgs @{ Root = $mobileRoot }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV root mismatch rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].applicationId = 'fixture.wrong.app'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV app mismatch rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].versionSource = (Join-Path $root 'other.properties')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV version source mismatch rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].allowedModes = @('Build', 'Package')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 package mode cannot be smuggled into TV record'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].packageEnabled = $true
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 TV package switch remains off'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.projects[1].externalOperations = @('Install')
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 external operation remains off'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.approvals = @([pscustomobject]@{ approvalId = 'unreviewed' })
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'unreviewed shared-v2 approval record rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad.expiresUtc = '2000-01-01T00:00:00Z'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'expired shared-v2 policy rejected'
+Assert-Denied {
+    $bad = Copy-SharedFixture; $bad | Add-Member -NotePropertyName unexpected -NotePropertyValue 'x'
+    $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'unknown shared-v2 field rejected'
+
 $settings = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\settings.gradle.kts') -Raw
 if ($settings -notmatch 'ptv-tv-workspace-preflight\.ps1' -or
     $settings -notmatch 'gradle\.startParameter\.taskNames' -or

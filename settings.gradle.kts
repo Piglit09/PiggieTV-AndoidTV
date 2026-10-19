@@ -12,6 +12,10 @@ plugins {
 
 // Every supported Gradle invocation passes the source and requested tasks through
 // the approved checkout guard before loading project code or running any task.
+// Configuration-cache hits skip this settings script, so they cannot use this guard.
+if (gradle.startParameter.isConfigurationCacheRequested) {
+    throw GradleException("PTV Android TV configuration cache is disabled because it skips the workspace preflight.")
+}
 val ptvPreflight = file("scripts/ptv-tv-workspace-preflight.ps1")
 if (!ptvPreflight.isFile) {
     throw GradleException("PTV Android TV workspace preflight is missing.")
