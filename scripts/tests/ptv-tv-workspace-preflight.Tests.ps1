@@ -52,8 +52,22 @@ Assert-Pass {
     if ((Get-PTVTvGradleMode @(':app:testDebugUnitTest', 'lintDebug')) -cne 'Build') { throw 'wrong mode' }
 } 'test and lint classified as local build'
 Assert-Pass {
-    if ((Get-PTVTvGradleMode @(':app:assemblePremiumFixture')) -cne 'Build') { throw 'wrong mode' }
-} 'fixture classified as local build'
+    if ((Get-PTVTvGradleMode @(':app:assemblePremiumFixture')) -cne 'DebugPackage') { throw 'wrong mode' }
+} 'fixture classified as debug APK build'
+Assert-Pass {
+    foreach ($task in @(':app:assembleDebug', ':app:assemblePremiumFixture')) {
+        if ((Get-PTVTvGradleMode @($task)) -cne 'DebugPackage') { throw "$task is not debug packaging" }
+    }
+} 'named debug APK tasks classified separately from release packaging'
+Assert-Pass {
+    foreach ($tasks in @(
+        @(':app:bundleDebug'),
+        @(':app:assembleDebug', ':app:unknownTask'),
+        @(':app:assembleDebug', ':app:assembleRelease')
+    )) {
+        if ((Get-PTVTvGradleMode $tasks) -cne 'Package') { throw "Unexpected package escaped: $($tasks -join ',')" }
+    }
+} 'unknown and mixed Gradle tasks cannot borrow debug authorization'
 Assert-Pass {
     if ((Get-PTVTvGradleMode @(':app:assembleRelease')) -cne 'Package') { throw 'wrong mode' }
 } 'release classified as package'
@@ -298,6 +312,96 @@ Assert-Denied {
     $c = With-Overrides $sharedArgs @{ SharedPolicy = $bad }
     $null = Assert-PTVTvSharedPolicy @c
 } 'unknown shared-v2 field rejected'
+
+function Copy-V3Fixture {
+    $policy = Copy-SharedFixture
+    $policy.schemaVersion = 3
+    foreach ($project in $policy.projects) {
+        if ($project.state -cne 'ACTIVE') { continue }
+        $project.PSObject.Properties.Remove('allowedModes')
+        $project.PSObject.Properties.Remove('packageEnabled')
+        $project.PSObject.Properties.Remove('externalOperations')
+        $project | Add-Member -NotePropertyName permissions -NotePropertyValue ([pscustomobject]@{
+            sourceEdit = $true; localBuild = $true; debugPackage = $true
+            testDeviceInstall = $false; testDeploy125 = $false
+            githubPublish = $false; productionDeploy50 = $false
+        })
+    }
+    return $policy
+}
+$v3Args = With-Overrides $sharedArgs @{
+    SharedPolicy = (Copy-V3Fixture); MinimumSchemaVersion = 3
+}
+Assert-Pass { $null = Assert-PTVTvSharedPolicy @v3Args } 'shared-v3 TV local build allowed'
+Assert-Pass {
+    $decoded = ($v3Args.SharedPolicy | ConvertTo-Json -Depth 10) | ConvertFrom-Json
+    $c = With-Overrides $v3Args @{ SharedPolicy = $decoded; Mode = 'DebugPackage' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'JSON-decoded shared-v3 TV debug build allowed'
+Assert-Pass {
+    $c = With-Overrides $v3Args @{ Mode = 'Edit' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV source edit allowed'
+Assert-Pass {
+    $c = With-Overrides $v3Args @{ Mode = 'DebugPackage' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV debug APK build allowed'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].permissions.localBuild = $false
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV local build requires its own permission'
+Assert-Pass {
+    $c = With-Overrides $sharedArgs @{ Mode = 'DebugPackage' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v2 existing debug build remains allowed'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].permissions.debugPackage = $false
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3; Mode = 'DebugPackage' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV debug build requires its own permission'
+Assert-Denied {
+    $c = With-Overrides $v3Args @{ Mode = 'Package' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV release packaging denied'
+Assert-Denied {
+    $c = With-Overrides $v3Args @{ Mode = 'Install' }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV device action denied'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].permissions.productionDeploy50 = $true
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV production authorization rejected'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].permissions.testDeviceInstall = $true
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV device authorization requires separate guard'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].permissions.PSObject.Properties.Remove('githubPublish')
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV incomplete permission record rejected'
+Assert-Denied {
+    $v3 = Copy-V3Fixture; $v3.projects[1].applicationId = 'com.piggietv.android'
+    $c = With-Overrides $v3Args @{ SharedPolicy = $v3 }
+    $null = Assert-PTVTvSharedPolicy @c
+} 'shared-v3 TV cross-project app substitution rejected'
+Assert-Pass {
+    $preflight = Join-Path $PSScriptRoot '..\ptv-tv-workspace-preflight.ps1'
+    $priorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $result = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File $preflight -Mode DebugPackage 2>&1
+    } finally {
+        $ErrorActionPreference = $priorPreference
+    }
+    if ($LASTEXITCODE -eq 0 -or ($result -join ' ') -notmatch 'only through a classified Gradle') {
+        throw 'Direct DebugPackage mode escaped the Gradle task classifier.'
+    }
+} 'direct DebugPackage mode cannot bypass task classification'
 
 $settings = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\settings.gradle.kts') -Raw
 if ($settings -notmatch 'ptv-tv-workspace-preflight\.ps1' -or

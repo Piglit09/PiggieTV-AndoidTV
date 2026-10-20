@@ -52,7 +52,12 @@ function Get-PTVTvGradleMode {
     if (@($simple | Where-Object { $_ -cmatch '(Beta|Release)' }).Count -gt 0) {
         return 'Package'
     }
-    $buildNames = '^(help|tasks|projects|properties|dependencies|dependencyInsight|clean|check|test.*|lint.*|compile.*|generate.*|process.*|merge.*|kapt.*|ksp.*|assembleDebug|assemblePremiumFixture)$'
+    $debugPackages = @($simple | Where-Object { $_ -cmatch '^assemble(Debug|PremiumFixture)$' })
+    $buildNames = '^(help|tasks|projects|properties|dependencies|dependencyInsight|clean|check|test.*|lint.*|compile.*|generate.*|process.*|merge.*|kapt.*|ksp.*)$'
+    if ($debugPackages.Count -gt 0 -and
+        @($simple | Where-Object { $_ -notmatch $buildNames -and $_ -cnotmatch '^assemble(Debug|PremiumFixture)$' }).Count -eq 0) {
+        return 'DebugPackage'
+    }
     if (@($simple | Where-Object { $_ -notmatch $buildNames }).Count -eq 0) { return 'Build' }
     return 'Package'
 }
@@ -126,26 +131,27 @@ function Assert-PTVTvSharedPolicy {
         ($MinimumSchemaVersion -isnot [int] -or $MinimumSchemaVersion -lt 0)) {
         throw 'Protected minimum schema version is invalid.'
     }
-    $sharedIsV2 = $false
+    $sharedSchema = $null
     if ($null -ne $SharedPolicy) {
         if ($SharedPolicy -isnot [pscustomobject]) { throw 'Shared policy must be an object.' }
         $schema = $SharedPolicy.PSObject.Properties['schemaVersion']
         if ($null -ne $schema) {
             if (($schema.Value -isnot [int] -and $schema.Value -isnot [long]) -or
-                $schema.Value -ne 2) {
+                $schema.Value -notin @(2, 3)) {
                 throw 'Shared policy schema is unsupported.'
             }
-            $sharedIsV2 = $true
+            $sharedSchema = [int]$schema.Value
         } elseif ($SharedPolicy.PSObject.Properties['projectId'] -eq $null -or
             $SharedPolicy.projectId -cne 'PTV_WEBOS') {
             throw 'Unversioned shared policy is not Android TV authority.'
         }
     }
     if ($null -ne $MinimumSchemaVersion -and $MinimumSchemaVersion -ge 2 -and
-        ($MinimumSchemaVersion -gt 2 -or -not $sharedIsV2)) {
+        ($MinimumSchemaVersion -gt 3 -or $null -eq $sharedSchema -or
+            $sharedSchema -lt $MinimumSchemaVersion)) {
         throw 'Protected minimum schema requires a supported shared policy.'
     }
-    if (-not $sharedIsV2) { return }
+    if ($null -eq $sharedSchema) { return }
     if ($null -ne $ChildPolicy) { throw 'TV child and shared policy authorities are ambiguous.' }
 
     Assert-PTVTvPolicyFields $SharedPolicy @('schemaVersion', 'policyId', 'issuedUtc',
@@ -188,9 +194,14 @@ function Assert-PTVTvSharedPolicy {
         if ($project.state -cne 'ACTIVE' -or $project.projectId -ceq 'PTV_WEB') {
             throw 'Shared project state is unsupported.'
         }
-        Assert-PTVTvPolicyFields $project @('projectId', 'state', 'sourceRoot',
-            'gitCommonDir', 'remote', 'applicationId', 'versionSource', 'artifactRoots',
-            'allowedModes', 'packageEnabled', 'externalOperations') 'ACTIVE project'
+        $activeFields = @('projectId', 'state', 'sourceRoot', 'gitCommonDir',
+            'remote', 'applicationId', 'versionSource', 'artifactRoots')
+        if ($sharedSchema -eq 2) {
+            $activeFields += @('allowedModes', 'packageEnabled', 'externalOperations')
+        } else {
+            $activeFields += 'permissions'
+        }
+        Assert-PTVTvPolicyFields $project $activeFields 'ACTIVE project'
         $projectRoot = Normalize-PTVTvPolicyPath $project.sourceRoot 'Shared source root'
         $projectCommon = Normalize-PTVTvPolicyPath $project.gitCommonDir 'Shared Git common directory'
         Assert-PTVTvPolicyString $project.versionSource 'Shared version source'
@@ -219,17 +230,34 @@ function Assert-PTVTvSharedPolicy {
                 throw 'Shared artifact root is duplicated.'
             }
         }
-        if ($project.allowedModes -isnot [array]) { throw 'Shared allowed modes must be an array.' }
-        $modeSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-        foreach ($allowedMode in $project.allowedModes) {
-            if ($allowedMode -isnot [string] -or $allowedMode -cnotin @('Edit', 'Build') -or
-                -not $modeSet.Add($allowedMode)) {
-                throw 'Shared policy has an unsupported or duplicate mode.'
+        if ($sharedSchema -eq 2) {
+            if ($project.allowedModes -isnot [array]) { throw 'Shared allowed modes must be an array.' }
+            $modeSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($allowedMode in $project.allowedModes) {
+                if ($allowedMode -isnot [string] -or $allowedMode -cnotin @('Edit', 'Build') -or
+                    -not $modeSet.Add($allowedMode)) {
+                    throw 'Shared policy has an unsupported or duplicate mode.'
+                }
             }
-        }
-        if ($project.packageEnabled -isnot [bool] -or $project.packageEnabled -or
-            $project.externalOperations -isnot [array] -or $project.externalOperations.Count -ne 0) {
-            throw 'Shared privileged operations are disabled in this build-only adapter.'
+            if ($project.packageEnabled -isnot [bool] -or $project.packageEnabled -or
+                $project.externalOperations -isnot [array] -or $project.externalOperations.Count -ne 0) {
+                throw 'Shared privileged operations are disabled in this build-only adapter.'
+            }
+        } else {
+            $permissionFields = @('sourceEdit', 'localBuild', 'debugPackage',
+                'testDeviceInstall', 'testDeploy125', 'githubPublish', 'productionDeploy50')
+            Assert-PTVTvPolicyFields $project.permissions $permissionFields 'Development permissions'
+            foreach ($permissionName in $permissionFields) {
+                if ($project.permissions.$permissionName -isnot [bool]) {
+                    throw "Development permission must be a boolean: $permissionName"
+                }
+            }
+            foreach ($externalName in @('testDeviceInstall', 'testDeploy125',
+                'githubPublish', 'productionDeploy50')) {
+                if ($project.permissions.$externalName) {
+                    throw "Shared external permission lacks an implemented approval gate: $externalName"
+                }
+            }
         }
         foreach ($priorRoot in $activeRoots) {
             if ($projectRoot.Equals($priorRoot, [StringComparison]::OrdinalIgnoreCase) -or
@@ -261,8 +289,22 @@ function Assert-PTVTvSharedPolicy {
     }
     Assert-PTVTvEqualPath $tvRecord.artifactRoots[0] `
         'C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-TV' 'Shared TV artifact root'
-    if ($Mode -cnotin @('Edit', 'Build') -or $tvRecord.allowedModes -cnotcontains $Mode) {
-        throw 'Shared Android TV operation is not authorized.'
+    if ($sharedSchema -eq 2) {
+        $legacyMode = if ($Mode -ceq 'DebugPackage') { 'Build' } else { $Mode }
+        if ($legacyMode -cnotin @('Edit', 'Build') -or
+            $tvRecord.allowedModes -cnotcontains $legacyMode) {
+            throw 'Shared Android TV operation is not authorized.'
+        }
+    } else {
+        $permissionName = switch -CaseSensitive ($Mode) {
+            'Edit' { 'sourceEdit' }
+            'Build' { 'localBuild' }
+            'DebugPackage' { 'debugPackage' }
+            default { throw 'Shared Android TV operation is not authorized.' }
+        }
+        if (-not $tvRecord.permissions.$permissionName) {
+            throw 'Shared Android TV operation is not authorized.'
+        }
     }
 }
 

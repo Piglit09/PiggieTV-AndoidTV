@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit', 'Edit', 'Build', 'Package', 'Install', 'Publish', 'Gradle')]
+    [ValidateSet('Audit', 'Edit', 'Build', 'DebugPackage', 'Package', 'Install', 'Publish', 'Gradle')]
     [string]$Mode = 'Audit',
     [string]$VersionOverride = '',
     [string]$AuditPath = '',
@@ -128,6 +128,8 @@ try {
     if ($Mode -eq 'Gradle') {
         $taskNames = if ([string]::IsNullOrWhiteSpace($GradleTasks)) { @() } else { @($GradleTasks -split '\|') }
         $Mode = Get-PTVTvGradleMode -TaskNames $taskNames
+    } elseif ($Mode -eq 'DebugPackage') {
+        throw 'DebugPackage is available only through a classified Gradle task request.'
     } elseif ($GradleTasks) {
         throw 'GradleTasks is valid only for the Gradle entrypoint.'
     }

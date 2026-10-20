@@ -22,8 +22,8 @@
 
 # Practical development workflow
 
-- Continue routine source edits, tests, local development builds, log inspection, and focused debugging in this approved checkout when the `Edit` or `Build` preflight passes. These steps do not need a separate operator approval for each task.
-- `assembleDebug` and `assemblePremiumFixture` produce local development APKs under the existing `Build` guard, including from a dirty development tree. Record the source commit, dirty state, version, build variant, and output hash. A debug APK is not an accepted Beta or release artifact.
+- Continue routine source edits, tests, local development builds, log inspection, and focused debugging in this approved checkout when the applicable preflight passes. These steps do not need a separate operator approval for each task.
+- `assembleDebug` and `assemblePremiumFixture` produce local development APKs, including from a dirty development tree. The guard classifies them as `DebugPackage`: the existing build-only policy keeps its prior allowance, while a future shared v3 policy must grant the separate `debugPackage` permission. Record the source commit, dirty state, version, build variant, and output hash. A debug APK is not an accepted Beta or release artifact.
 - Keep Beta/release packaging, device installation, publication, and deployment denied by the current guard. A future registered test-device install needs device-specific authorization and a tested guard; permission to build a debug APK does not grant permission to install it.
 - Make a local commit after relevant automated validation passes. State clearly when hosted or physical acceptance is still pending; a local checkpoint is not release acceptance. Pushes, protected-branch merges, releases, source deletion, new persistent source roots, and infrastructure creation need separate operator approval.
 - If a protected operation is blocked, finish independent local work and report the exact operator action needed. Do not create another repository, worktree, device route, or infrastructure target to bypass the guard.
