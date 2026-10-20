@@ -19,3 +19,11 @@
 - The accepted `0.8.12-beta.1` APK and installed Fire TV applications remain protected. The Adaptive Hero source checkpoint does not enable Hero in Beta/release variants; trailer code is excluded from this source checkpoint.
 - Final task reports must name starting and ending branch/commit, changed paths, tests and build results, artifact hashes, dirty/untracked state, and whether any device, server, production installation, release channel, or Git remote was changed.
 - The guard controls supported entrypoints. It cannot prevent arbitrary manual filesystem writes or direct use of third-party tools. Maintain operator-side filesystem/tool restrictions for those actions.
+
+# Practical development workflow
+
+- Continue routine source edits, tests, local development builds, log inspection, and focused debugging in this approved checkout when the `Edit` or `Build` preflight passes. These steps do not need a separate operator approval for each task.
+- `assembleDebug` and `assemblePremiumFixture` produce local development APKs under the existing `Build` guard, including from a dirty development tree. Record the source commit, dirty state, version, build variant, and output hash. A debug APK is not an accepted Beta or release artifact.
+- Keep Beta/release packaging, device installation, publication, and deployment denied by the current guard. A future registered test-device install needs device-specific authorization and a tested guard; permission to build a debug APK does not grant permission to install it.
+- Make a local commit after relevant automated validation passes. State clearly when hosted or physical acceptance is still pending; a local checkpoint is not release acceptance. Pushes, protected-branch merges, releases, source deletion, new persistent source roots, and infrastructure creation need separate operator approval.
+- If a protected operation is blocked, finish independent local work and report the exact operator action needed. Do not create another repository, worktree, device route, or infrastructure target to bypass the guard.
