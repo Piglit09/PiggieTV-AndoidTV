@@ -18,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.view.isVisible
 import coil.dispose
 import coil.imageLoader
 import coil.load
@@ -36,6 +37,7 @@ import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.ui.rendering.TvRenderingProfile
 import com.piggie.tv.ui.layout.TvLayoutProfileResolver
+import com.piggie.tv.ui.home.HomeHeroPresentation
 import com.piggie.tv.ui.shared.TextSanitizer
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
@@ -51,21 +53,28 @@ class HeroRowView(
     private val onControlsFocusChanged: (Boolean) -> Unit,
     private val onImageResult: (String, Long, String?) -> Unit
 ) : FrameLayout(context) {
+    private val backdropFloor = if (route == HeroRoute.HOME) PTVColors.cinemaInk else PTVColors.background
     private val backdrop = ImageView(context).apply {
+        id = R.id.hero_backdrop
         scaleType = ImageView.ScaleType.CENTER_CROP
-        setBackgroundColor(PTVColors.background)
+        setBackgroundColor(backdropFloor)
     }
     private val overlay = View(context).apply {
-        setBackgroundResource(R.drawable.hero_gradient_overlay)
-        // The hero owns exactly one scrim. Keeping it attached on the Fire profile makes
-        // text readable without restoring the old full-route translucent backdrop stack.
+        setBackgroundResource(
+            if (route == HeroRoute.HOME) R.drawable.ptv_home_hero_scrim
+            else R.drawable.hero_gradient_overlay
+        )
+        // The hero owns one text scrim. Home adds only a narrow static floor blend below it;
+        // Fire keeps text readable without restoring a full-route translucent backdrop stack.
         visibility = View.VISIBLE
     }
     private val logo = ImageView(context).apply {
+        id = R.id.hero_logo
         scaleType = ImageView.ScaleType.FIT_START
         adjustViewBounds = true
     }
     private val title = TextView(context).apply {
+        id = R.id.hero_title
         setTextSizeRes(R.dimen.tv_text_size_hero_title)
         setTextColor(PTVColors.textPrimary)
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -73,19 +82,24 @@ class HeroRowView(
         ellipsize = TextUtils.TruncateAt.END
     }
     private val metadata = TextView(context).apply {
+        id = R.id.hero_metadata
         setTextSizeRes(R.dimen.tv_text_size_hero_meta)
         setTextColor(PTVColors.textSecondary)
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
     private val overview = TextView(context).apply {
+        id = R.id.hero_overview
         setTextSizeRes(R.dimen.tv_text_size_hero_body)
         setTextColor(PTVColors.textSecondary)
         maxLines = resources.getInteger(R.integer.tv_hero_overview_max_lines)
         ellipsize = TextUtils.TruncateAt.END
     }
-    private val primary = heroButton(primary = true)
-    private val details = heroButton(primary = false).apply { text = "Details" }
+    private val primary = heroButton(primary = true).apply { id = R.id.hero_primary_action }
+    private val details = heroButton(primary = false).apply {
+        id = R.id.hero_details_action
+        text = "Details"
+    }
     private lateinit var content: LinearLayout
     private lateinit var actions: LinearLayout
     private var current: HeroCandidate? = null
@@ -98,19 +112,23 @@ class HeroRowView(
     private var activeLogoCacheKey: String? = null
     private var preloadedBackdropKey: String? = null
     private var lastMeasurementSignature: String? = null
+    private var homePresentation: HomeHeroPresentation? = null
     private val useStaticCornerMask = HeroRoundingPolicy.useStaticCornerMask(
         profile = TvRenderingRuntime.profile(),
         opaqueRoot = TvRenderingRuntime.features().opaqueRoots
     )
     private val cornerMaskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = PTVColors.background
+        color = backdropFloor
         style = Paint.Style.FILL
     }
-    private val cornerMaskPath = Path()
+    // Distinct paths keep each GPU antialias mask bounded to one corner, instead of caching a
+    // full-hero mask for four distant contours. They are reused for the lifetime of this view.
+    private val cornerMaskPaths = Array(4) { Path() }
 
     init {
         id = R.id.hero_row
-        minimumHeight = context.dim(R.dimen.tv_hero_height)
+        minimumHeight = context.dim(R.dimen.tv_hero_height) +
+            context.dim(R.dimen.tv_floating_nav_clearance)
         outlineProvider = HeroRoundedOutlineProvider
         // Clipping this full hierarchy forces the enlarged backdrop, scrim, text, logo and
         // controls through one rounded GPU clip on every damaged frame. Fire's root is a known
@@ -118,13 +136,26 @@ class HeroRowView(
         clipToOutline = !useStaticCornerMask
         addView(backdrop, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(overlay, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        if (route == HeroRoute.HOME) {
+            addView(View(context).apply {
+                setBackgroundResource(R.drawable.ptv_home_hero_floor_fade)
+            }, LayoutParams(
+                LayoutParams.MATCH_PARENT,
+                context.dim(R.dimen.ptv_home_hero_floor_fade_height),
+                Gravity.BOTTOM
+            ))
+        }
 
         content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.START
+            // Focused actions can extend beyond their row and this content padding.
+            clipChildren = false
+            clipToPadding = false
             setPadding(
                 context.dim(R.dimen.tv_screen_margin_horizontal),
-                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_large) +
+                    context.dim(R.dimen.tv_floating_nav_clearance),
                 context.dim(R.dimen.tv_screen_margin_horizontal),
                 0
             )
@@ -153,6 +184,9 @@ class HeroRowView(
         )
         actions = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            // The 1.04x focus treatment extends beyond this row's last button bounds.
+            clipChildren = false
+            clipToPadding = false
             setPadding(0, context.dim(R.dimen.tv_spacing_medium), 0, 0)
             addView(
                 primary,
@@ -174,7 +208,12 @@ class HeroRowView(
 
         primary.setOnClickListener { current?.item?.let(onPrimary) }
         details.setOnClickListener { current?.item?.let(onDetails) }
-        val focusListener = OnFocusChangeListener { _, _ ->
+        val focusListener = OnFocusChangeListener { button, focused ->
+            if (route == HeroRoute.HOME) {
+                val scale = if (focused) 1.04f else 1f
+                button.scaleX = scale
+                button.scaleY = scale
+            }
             onControlsFocusChanged(primary.hasFocus() || details.hasFocus())
         }
         primary.onFocusChangeListener = focusListener
@@ -189,13 +228,16 @@ class HeroRowView(
 
     override fun dispatchDraw(canvas: Canvas) {
         super.dispatchDraw(canvas)
-        if (useStaticCornerMask && !cornerMaskPath.isEmpty) {
-            canvas.drawPath(cornerMaskPath, cornerMaskPaint)
+        if (useStaticCornerMask && !cornerMaskPaths[0].isEmpty) {
+            canvas.drawPath(cornerMaskPaths[0], cornerMaskPaint)
+            canvas.drawPath(cornerMaskPaths[1], cornerMaskPaint)
+            canvas.drawPath(cornerMaskPaths[2], cornerMaskPaint)
+            canvas.drawPath(cornerMaskPaths[3], cornerMaskPaint)
         }
     }
 
     private fun rebuildCornerMask(width: Int, height: Int) {
-        cornerMaskPath.reset()
+        cornerMaskPaths.forEach(Path::reset)
         if (width <= 0 || height <= 0) return
         val radius = resources.getDimension(R.dimen.tv_hero_corner_radius)
             .coerceAtMost(width / 2f)
@@ -203,14 +245,16 @@ class HeroRowView(
         if (radius <= 0f) return
         val control = radius * CIRCLE_CONTROL_FACTOR
 
-        cornerMaskPath.moveTo(0f, 0f)
-        cornerMaskPath.lineTo(radius, 0f)
-        cornerMaskPath.cubicTo(radius - control, 0f, 0f, radius - control, 0f, radius)
-        cornerMaskPath.close()
+        val topLeft = cornerMaskPaths[0]
+        topLeft.moveTo(0f, 0f)
+        topLeft.lineTo(radius, 0f)
+        topLeft.cubicTo(radius - control, 0f, 0f, radius - control, 0f, radius)
+        topLeft.close()
 
-        cornerMaskPath.moveTo(width.toFloat(), 0f)
-        cornerMaskPath.lineTo(width - radius, 0f)
-        cornerMaskPath.cubicTo(
+        val topRight = cornerMaskPaths[1]
+        topRight.moveTo(width.toFloat(), 0f)
+        topRight.lineTo(width - radius, 0f)
+        topRight.cubicTo(
             width - radius + control,
             0f,
             width.toFloat(),
@@ -218,11 +262,12 @@ class HeroRowView(
             width.toFloat(),
             radius
         )
-        cornerMaskPath.close()
+        topRight.close()
 
-        cornerMaskPath.moveTo(width.toFloat(), height.toFloat())
-        cornerMaskPath.lineTo(width.toFloat(), height - radius)
-        cornerMaskPath.cubicTo(
+        val bottomRight = cornerMaskPaths[2]
+        bottomRight.moveTo(width.toFloat(), height.toFloat())
+        bottomRight.lineTo(width.toFloat(), height - radius)
+        bottomRight.cubicTo(
             width.toFloat(),
             height - radius + control,
             width - radius + control,
@@ -230,11 +275,12 @@ class HeroRowView(
             width - radius,
             height.toFloat()
         )
-        cornerMaskPath.close()
+        bottomRight.close()
 
-        cornerMaskPath.moveTo(0f, height.toFloat())
-        cornerMaskPath.lineTo(radius, height.toFloat())
-        cornerMaskPath.cubicTo(
+        val bottomLeft = cornerMaskPaths[3]
+        bottomLeft.moveTo(0f, height.toFloat())
+        bottomLeft.lineTo(radius, height.toFloat())
+        bottomLeft.cubicTo(
             radius - control,
             height.toFloat(),
             0f,
@@ -242,7 +288,7 @@ class HeroRowView(
             0f,
             height - radius
         )
-        cornerMaskPath.close()
+        bottomLeft.close()
     }
 
     /** Debug-only physical-layout evidence; contains geometry only, never media identifiers. */
@@ -255,7 +301,8 @@ class HeroRowView(
             return "${location[0]},${location[1]},${location[0] + view.width},${location[1] + view.height}"
         }
         val params = row.layoutParams as? ViewGroup.MarginLayoutParams
-        val expectedPx = resources.getDimensionPixelSize(R.dimen.tv_hero_height)
+        val expectedPx = resources.getDimensionPixelSize(R.dimen.tv_hero_height) +
+            resources.getDimensionPixelSize(R.dimen.tv_floating_nav_clearance)
         val (profile, viewport) = TvLayoutProfileResolver.from(context)
         val rowBounds = bounds(row)
         val heroBounds = bounds(this)
@@ -284,7 +331,8 @@ class HeroRowView(
                 "marginsPx=${params?.leftMargin ?: 0},${params?.topMargin ?: 0}," +
                 "${params?.rightMargin ?: 0},${params?.bottomMargin ?: 0} " +
                 "paddingPx=${row.paddingLeft},${row.paddingTop},${row.paddingRight},${row.paddingBottom} " +
-                "resource=${resources.getResourceName(R.dimen.tv_hero_height)} density=$density " +
+                "resources=${resources.getResourceName(R.dimen.tv_hero_height)}+" +
+                "${resources.getResourceName(R.dimen.tv_floating_nav_clearance)} density=$density " +
                 "sw=${viewport.smallestWidthDp} profile=$profile"
         )
     }
@@ -359,6 +407,81 @@ class HeroRowView(
         preload(state.next)
     }
 
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        positionHomeActions()
+    }
+
+    /** Changes only Home composition; artwork and action views retain their identity. */
+    fun setHomePresentation(presentation: HomeHeroPresentation) {
+        if (route != HeroRoute.HOME || homePresentation == presentation) return
+        homePresentation = presentation
+        val horizontal = context.dim(R.dimen.tv_screen_margin_horizontal)
+        val clearance = context.dim(R.dimen.tv_floating_nav_clearance)
+        // A vertical LinearLayout gives unspecified children MATCH_PARENT width. Keep the
+        // title inside the identity column so its focus-neighbor bounds never overlap actions.
+        (title.layoutParams as LinearLayout.LayoutParams).apply {
+            width = context.dim(R.dimen.tv_hero_content_width)
+            title.layoutParams = this
+        }
+        (actions.layoutParams as LinearLayout.LayoutParams).apply {
+            width = LayoutParams.WRAP_CONTENT
+            actions.layoutParams = this
+        }
+        if (presentation == HomeHeroPresentation.COLLAPSED) {
+            content.gravity = Gravity.START or Gravity.TOP
+            content.setPadding(horizontal, clearance + context.dim(R.dimen.tv_spacing_small), horizontal, 0)
+            overview.visibility = View.GONE
+        } else {
+            content.gravity = Gravity.START or Gravity.BOTTOM
+            content.setPadding(
+                horizontal,
+                clearance + context.dim(R.dimen.tv_spacing_large),
+                horizontal,
+                context.dim(R.dimen.tv_spacing_large)
+            )
+            overview.visibility = View.VISIBLE
+        }
+        requestLayout()
+    }
+
+    fun homeActionFor(view: View?): HeroFocusAction? = if (route == HeroRoute.HOME) {
+        when (view) {
+            primary -> HeroFocusAction.PRIMARY
+            details -> HeroFocusAction.DETAILS
+            else -> null
+        }
+    } else null
+
+    fun requestHomeActionFocus(action: HeroFocusAction): Boolean {
+        if (!homeActionsAvailable()) return false
+        return when (action) {
+            HeroFocusAction.PRIMARY -> primary.requestFocus()
+            HeroFocusAction.DETAILS -> details.requestFocus()
+        }
+    }
+
+    fun homeActionsAvailable(): Boolean =
+        route == HeroRoute.HOME && current != null &&
+            primary.isVisible && details.isVisible
+
+    private fun positionHomeActions() {
+        if (route != HeroRoute.HOME || homePresentation != HomeHeroPresentation.COLLAPSED) return
+        // Relayout the already mounted child so DPAD focus bounds match visible controls.
+        // The parent and both action views retain identity through every transition.
+        val actionLeft = (width - content.paddingRight - actions.width)
+            .coerceAtLeast(content.paddingLeft)
+        val identity = if (logo.isVisible) logo else title
+        val actionTop = ((identity.top + metadata.bottom - actions.height) / 2f)
+            .toInt().coerceAtLeast(0)
+        actions.layout(
+            actionLeft,
+            actionTop,
+            actionLeft + actions.width,
+            actionTop + actions.height
+        )
+    }
+
     override fun onDetachedFromWindow() {
         releaseArtwork()
         super.onDetachedFromWindow()
@@ -428,7 +551,7 @@ class HeroRowView(
 
         backdrop.load(request.url) {
             crossfade(TvRenderingRuntime.features().transitions && !reduceMotion())
-            placeholder(backdrop.drawable ?: ColorDrawable(PTVColors.background))
+            placeholder(backdrop.drawable ?: ColorDrawable(backdropFloor))
             size(HERO_IMAGE_WIDTH, HERO_IMAGE_HEIGHT)
             memoryCacheKey(request.cacheKey)
             setParameter(
@@ -588,7 +711,7 @@ class HeroRowView(
         if (route == HeroRoute.MUSIC) {
             backdrop.setImageResource(R.drawable.music_hero_branded_background)
         } else {
-            backdrop.setImageDrawable(ColorDrawable(PTVColors.background))
+            backdrop.setImageDrawable(ColorDrawable(backdropFloor))
         }
     }
 
@@ -604,7 +727,12 @@ class HeroRowView(
         setTextSizeRes(R.dimen.tv_hero_button_text_size)
         setTextColor(PTVColors.textPrimary)
         setBackgroundResource(
-            if (primary) R.drawable.tv_button_primary else R.drawable.tv_button_secondary
+            when {
+                route == HeroRoute.HOME && primary -> R.drawable.ptv_home_hero_primary
+                route == HeroRoute.HOME -> R.drawable.ptv_home_hero_secondary
+                primary -> R.drawable.tv_button_primary
+                else -> R.drawable.tv_button_secondary
+            }
         )
         setPadding(
             context.dim(R.dimen.tv_spacing_large),

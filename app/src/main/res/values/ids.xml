@@ -11,7 +11,22 @@
     <item name="card_artwork" type="id" />
     <item name="focus_artwork_view" type="id" />
     <item name="hero_row" type="id" />
+    <item name="hero_backdrop" type="id" />
+    <item name="hero_logo" type="id" />
+    <item name="hero_title" type="id" />
+    <item name="hero_metadata" type="id" />
+    <item name="hero_overview" type="id" />
+    <item name="hero_primary_action" type="id" />
+    <item name="hero_details_action" type="id" />
     <item name="discovery_shelf_id" type="id" />
+    <item name="ptv_discovery_item_id" type="id" />
+    <item name="ptv_shows_tab_shows" type="id" />
+    <item name="ptv_shows_tab_anime" type="id" />
+    <item name="ptv_shows_tab_cartoons" type="id" />
+    <item name="ptv_library_browse_all" type="id" />
+    <item name="ptv_library_sort" type="id" />
+    <item name="ptv_library_filter" type="id" />
+    <item name="ptv_library_view" type="id" />
 
     <item name="player_view" type="id" />
     <item name="player_title" type="id" />
@@ -24,6 +39,9 @@
     <item name="player_connection_speed_btn" type="id" />
 
     <item name="ptv_content_frame" type="id" />
+    <item name="ptv_details_container" type="id" />
     <item name="ptv_header" type="id" />
     <item name="ptv_nav_rail" type="id" />
+    <item name="ptv_settings_profile_entry" type="id" />
+    <item name="ptv_profile_settings_entry" type="id" />
 </resources>

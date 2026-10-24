@@ -2,7 +2,6 @@ package com.piggie.tv.navigation
 
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -15,6 +14,7 @@ import android.widget.TextView
 import androidx.lifecycle.lifecycleScope
 import coil.load
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.models.NativeSession
@@ -24,6 +24,7 @@ import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.ui.player.NowPlayingActivity
 import com.piggie.tv.ui.layout.TvLayoutProfileResolver
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
+import com.piggie.tv.ui.rendering.TvRenderingProfile
 import com.piggie.tv.ui.widgets.PtvWaveProgressView
 import com.piggie.tv.theme.PTVColors
 import com.piggie.tv.util.dim
@@ -33,13 +34,49 @@ import kotlinx.coroutines.launch
 
 data class NativePtvShellHost(
     val content: FrameLayout,
-    val navigation: Map<NativeRoute, Button>
+    val navigation: Map<NativeRoute, Button>,
+    val navigationRail: View
 )
 
+internal object NativeRailMaterialPolicy {
+    private fun premium(route: NativeRoute, detailsItemType: String?): Boolean =
+        route in setOf(NativeRoute.HOME, NativeRoute.MOVIES, NativeRoute.SHOWS, NativeRoute.SEARCH) ||
+            detailsItemType.equals("Movie", ignoreCase = true) ||
+            detailsItemType.equals("Series", ignoreCase = true)
+
+    fun background(
+        route: NativeRoute,
+        profile: TvRenderingProfile,
+        detailsItemType: String? = null
+    ): Int = when {
+        !premium(route, detailsItemType) -> R.drawable.tv_nav_rail
+        profile == TvRenderingProfile.FIRE_TV_PERFORMANCE -> R.drawable.tv_nav_rail_performance
+        else -> R.drawable.tv_nav_rail_premium
+    }
+
+    fun buttonBackground(route: NativeRoute, detailsItemType: String? = null): Int =
+        if (premium(route, detailsItemType)) R.drawable.tv_nav_button_premium
+        else R.drawable.tv_nav_button
+}
+
 object NativePtvShell {
+    fun applyRailPresentation(rail: View, route: NativeRoute, detailsItemType: String? = null) {
+        rail.setBackgroundResource(
+            NativeRailMaterialPolicy.background(route, TvRenderingRuntime.profile(), detailsItemType)
+        )
+        if (rail is ViewGroup) {
+            for (index in 0 until rail.childCount) {
+                (rail.getChildAt(index) as? Button)?.setBackgroundResource(
+                    NativeRailMaterialPolicy.buttonBackground(route, detailsItemType)
+                )
+            }
+        }
+    }
+
     fun create(
         activity: Activity,
         selected: NativeRoute,
+        resolveContentUpExit: (View, View) -> View = { _, defaultTarget -> defaultTarget },
         onRouteSelected: (NativeRoute) -> Unit
     ): NativePtvShellHost {
         val (profile, viewport) = TvLayoutProfileResolver.from(activity)
@@ -83,13 +120,13 @@ object NativePtvShell {
             activity.dim(R.dimen.tv_header_logo_height)
         ).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
 
-        // 2. Navigation Rail (In between Logo and Profile)
+        // 2. Centered navigation rail
         val buttons = linkedMapOf<NativeRoute, Button>()
         val rail = LinearLayout(activity).apply {
             id = R.id.ptv_nav_rail
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundResource(R.drawable.tv_nav_rail)
+            applyRailPresentation(this, selected)
             val railPadding = activity.dim(R.dimen.tv_nav_rail_padding)
             setPadding(railPadding, railPadding, railPadding, railPadding)
         }
@@ -103,8 +140,8 @@ object NativePtvShell {
                 minWidth = 0
                 minimumWidth = 0
                 setTextColor(activity.getColor(R.color.tv_text_primary))
-                setBackgroundResource(R.drawable.tv_nav_button)
-                isSelected = route == selected
+                setBackgroundResource(NativeRailMaterialPolicy.buttonBackground(selected))
+                isSelected = route == NativeRouteNavigator.navigationSelection(selected)
                 setOnClickListener { onRouteSelected(route) }
             }
             buttons[route] = button
@@ -134,41 +171,25 @@ object NativePtvShell {
             Gravity.CENTER
         ))
 
-        // 3. Profile Button
-        val profileButton = Button(activity).apply {
-            id = View.generateViewId()
-            text = "Profile"
-            setTextSizeRes(R.dimen.tv_nav_text_size)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            isAllCaps = false
-            setTextColor(activity.getColor(R.color.tv_text_primary))
-            setBackgroundResource(R.drawable.tv_nav_profile_button)
-            contentDescription = activity.getString(R.string.profile_button_description)
-            isSelected = selected == NativeRoute.PROFILE
-            setOnClickListener { onRouteSelected(NativeRoute.PROFILE) }
-        }
-        buttons[NativeRoute.PROFILE] = profileButton
-        header.addView(
-            profileButton,
-            FrameLayout.LayoutParams(
-                activity.dim(R.dimen.tv_profile_button_width),
-                activity.dim(R.dimen.tv_profile_button_height),
-                Gravity.END or Gravity.CENTER_VERTICAL
-            )
-        )
-        
-        container.addView(header)
-
-        val content = FrameLayout(activity).apply {
+        val content = RouteContentFrame(activity, resolveContentUpExit).apply {
             id = R.id.ptv_content_frame
         }
         container.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         
         val miniPlayer = createMiniPlayer(activity)
         container.addView(miniPlayer)
+
+        root.addView(
+            header,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            )
+        )
         
         activity.setContentView(root)
-        return NativePtvShellHost(content, buttons)
+        return NativePtvShellHost(content, buttons, rail)
     }
 
     private fun createMiniPlayer(activity: Activity): View {
@@ -248,7 +269,16 @@ object NativePtvShell {
                     if (item != null) {
                         title.text = item.title
                         artist.text = item.artists.firstOrNull() ?: item.albumArtist
-                        art.load(JellyfinNativeApi(activity).imageUrl(SecureSessionStore(activity).read()!!, item, MediaCardPresentation.SQUARE))
+                        val store = SecureSessionStore(activity)
+                        val session = AuthSessionCoordinator.validatedSession(store)
+                            ?: return@collect
+                        art.load(
+                            JellyfinNativeApi(activity).imageUrl(
+                                session,
+                                item,
+                                MediaCardPresentation.SQUARE
+                            )
+                        )
                     }
                 }
             }

@@ -17,6 +17,7 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.api.NativeRequestScope
@@ -81,7 +82,9 @@ class SearchFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View {
         session = (activity as? PtvHostActivity)?.session
-            ?: requireNotNull(store.read()) { "A signed-in session is required for Search" }
+            ?: requireNotNull(AuthSessionCoordinator.validatedSession(store)) {
+                "A signed-in session is required for Search"
+            }
 
         val context = requireContext()
         val manager = TvLinearLayoutManager(context, RecyclerView.VERTICAL, false)
@@ -92,16 +95,17 @@ class SearchFragment : Fragment() {
 
         return RecyclerView(context).apply {
             id = View.generateViewId()
+            setBackgroundResource(R.drawable.ptv_search_background)
             layoutManager = manager
             this.adapter = adapter
             applyRenderingTuning(manager, visibleItems = 4)
             setPadding(
                 safeMargin,
-                0,
+                context.dim(R.dimen.tv_floating_nav_clearance),
                 safeMargin,
                 context.dim(R.dimen.tv_spacing_large)
             )
-            clipToPadding = false
+            clipToPadding = true
             clipChildren = false
             isFocusable = false
             descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
@@ -310,11 +314,18 @@ class SearchFragment : Fragment() {
                         sizeResource = R.dimen.tv_text_size_body,
                         colorResource = R.color.tv_text_secondary
                     ).apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        setBackgroundResource(R.drawable.ptv_search_status)
                         setPadding(
-                            0,
                             context.dim(R.dimen.tv_spacing_large),
-                            0,
-                            context.dim(R.dimen.tv_spacing_medium)
+                            context.dim(R.dimen.tv_spacing_large),
+                            context.dim(R.dimen.tv_spacing_large),
+                            context.dim(R.dimen.tv_spacing_large)
+                        )
+                        minHeight = context.dim(R.dimen.tv_missing_artwork_height)
+                        layoutParams = RecyclerView.LayoutParams(
+                            context.dim(R.dimen.tv_settings_content_width),
+                            ViewGroup.LayoutParams.WRAP_CONTENT
                         )
                     }
                 )
@@ -375,21 +386,37 @@ class SearchFragment : Fragment() {
             val context = parent.context
             val content = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(0, 0, 0, context.dim(R.dimen.tv_spacing_medium))
+                setPadding(
+                    0,
+                    context.dim(R.dimen.tv_spacing_large),
+                    0,
+                    context.dim(R.dimen.tv_spacing_large)
+                )
             }
             content.addView(
                 createLabel(
                     value = "Search",
-                    sizeResource = R.dimen.tv_text_size_page_title,
+                    sizeResource = R.dimen.ptv_details_title_size,
                     colorResource = R.color.tv_text_primary,
                     bold = true
                 )
+            )
+            content.addView(
+                createLabel(
+                    value = "Explore movies, series, music and people",
+                    sizeResource = R.dimen.tv_text_size_body,
+                    colorResource = R.color.tv_text_secondary
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = context.dim(R.dimen.tv_spacing_small) }
             )
 
             val row = LinearLayout(context).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, context.dim(R.dimen.tv_spacing_medium), 0, 0)
+                setPadding(0, context.dim(R.dimen.tv_spacing_large), 0, 0)
             }
             val input = EditText(context).apply {
                 id = View.generateViewId()
@@ -399,7 +426,7 @@ class SearchFragment : Fragment() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                 setTextColor(context.getColor(R.color.tv_text_primary))
                 setHintTextColor(context.getColor(R.color.tv_text_secondary))
-                setBackgroundResource(R.drawable.tv_field_bg)
+                setBackgroundResource(R.drawable.ptv_search_field)
                 setPadding(
                     context.dim(R.dimen.tv_spacing_medium),
                     context.dim(R.dimen.tv_spacing_small),
@@ -413,7 +440,9 @@ class SearchFragment : Fragment() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                 isAllCaps = false
                 setTextColor(context.getColor(R.color.tv_text_primary))
-                setBackgroundResource(R.drawable.tv_button_primary)
+                setBackgroundResource(R.drawable.ptv_search_action)
+                stateListAnimator = null
+                elevation = 0f
             }
             input.nextFocusRightId = searchButton.id
             searchButton.nextFocusLeftId = input.id
@@ -436,7 +465,13 @@ class SearchFragment : Fragment() {
                     marginStart = context.dim(R.dimen.tv_spacing_medium)
                 }
             )
-            content.addView(row)
+            content.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    context.dim(R.dimen.tv_settings_content_width),
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
 
             val scopeAdapter = SearchScopeAdapter(input.id, searchButton.id)
             val scopeManager = TvLinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
@@ -450,7 +485,7 @@ class SearchFragment : Fragment() {
                 descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
                 clipChildren = false
                 clipToPadding = false
-                setPadding(0, context.dim(R.dimen.tv_spacing_small), 0, 0)
+                setPadding(0, context.dim(R.dimen.tv_spacing_medium), 0, 0)
             }
             content.addView(
                 scopeRecycler,
@@ -515,6 +550,9 @@ class SearchFragment : Fragment() {
                 isFocusable = true
                 setTextSizeRes(R.dimen.tv_nav_text_size)
                 setTextColor(context.getColor(R.color.tv_text_primary))
+                setBackgroundResource(R.drawable.ptv_search_scope)
+                stateListAnimator = null
+                elevation = 0f
                 minimumWidth = 0
                 minWidth = 0
                 minimumHeight = 0
@@ -555,13 +593,7 @@ class SearchFragment : Fragment() {
                 } else {
                     "${scope.label}, search category"
                 }
-                button.setBackgroundResource(
-                    if (scope == selectedScope) {
-                        R.drawable.tv_button_primary
-                    } else {
-                        R.drawable.tv_button_secondary
-                    }
-                )
+                button.isSelected = scope == selectedScope
                 button.nextFocusUpId = if (position >= scopes.lastIndex - 1) {
                     searchButtonId
                 } else {
@@ -727,7 +759,7 @@ class SearchFragment : Fragment() {
         override fun getItemViewType(position: Int): Int = presentation.ordinal
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MediaCardHolder =
-            MediaCardHolder(MediaCardFactory.createView(parent, presentation))
+            MediaCardHolder(MediaCardFactory.createView(parent, presentation, premiumMaterial = true, browseTitle = true))
 
         override fun onBindViewHolder(holder: MediaCardHolder, position: Int) {
             val item = items[position]

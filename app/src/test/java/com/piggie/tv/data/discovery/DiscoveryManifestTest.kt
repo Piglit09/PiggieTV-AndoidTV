@@ -7,21 +7,27 @@ import org.junit.Test
 
 class DiscoveryManifestTest {
     @Test
-    fun everyDiscoveryPageHasExactlyEightUniqueShelves() {
+    fun eachDiscoveryPageHasItsOwnUniqueManifest() {
         DiscoveryPage.entries.forEach { page ->
             val manifest = DiscoveryManager.manifest(page)
             assertEquals(page, manifest.page)
-            assertEquals(8, manifest.expectedShelves)
-            assertEquals(8, manifest.shelves.size)
-            assertEquals(8, manifest.shelves.map { it.id }.distinct().size)
+            val expected = when (page) {
+                DiscoveryPage.HOME -> 8
+                DiscoveryPage.MOVIES -> 2
+                else -> 1
+            }
+            assertEquals(expected, manifest.expectedShelves)
+            assertEquals(expected, manifest.shelves.size)
+            assertEquals(expected, manifest.shelves.map { it.id }.distinct().size)
         }
     }
 
     @Test
-    fun moviesDefinesTwoGenresAndTwoStudios() {
+    fun moviesUsesOnlyItsLibraryRoot() {
         val shelves = DiscoveryManager.manifest(DiscoveryPage.MOVIES).shelves
-        assertEquals(2, shelves.count { it.type == DiscoveryShelfType.RANDOM_GENRE })
-        assertEquals(2, shelves.count { it.type == DiscoveryShelfType.RANDOM_STUDIO })
+        assertEquals(2, shelves.size)
+        assertTrue(shelves.all { it.type == DiscoveryShelfType.LIBRARY_SPECIFIC })
+        assertTrue(shelves.all { it.libraryName == "Movies" })
     }
 
     @Test

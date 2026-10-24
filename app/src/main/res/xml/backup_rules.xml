@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="ptv_secure_session.xml" />
+    <exclude domain="sharedpref" path="ptv_secure_session.xml.bak" />
+    <exclude domain="sharedpref" path="ptv_secure_credentials.xml" />
+    <exclude domain="sharedpref" path="ptv_secure_credentials.xml.bak" />
+    <exclude domain="sharedpref" path="ptv_session_metadata.xml" />
+    <exclude domain="sharedpref" path="ptv_session_metadata.xml.bak" />
+    <exclude domain="sharedpref" path="ptv_auth_guard.xml" />
+    <exclude domain="sharedpref" path="ptv_auth_guard.xml.bak" />
+    <exclude domain="sharedpref" path="ptv_auth.xml" />
+    <exclude domain="sharedpref" path="ptv_auth.xml.bak" />
+    <exclude domain="file" path="ptv_crash_reports.json" />
+    <exclude domain="file" path="diagnostics/" />
+</full-backup-content>

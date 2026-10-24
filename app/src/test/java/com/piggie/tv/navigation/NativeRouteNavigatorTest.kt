@@ -8,10 +8,16 @@ class NativeRouteNavigatorTest {
     @Test
     fun backFromTopLevelReturnsToHome() {
         NativeRoute.entries.forEach {
-            if (it != NativeRoute.HOME) {
+            if (it != NativeRoute.HOME && it != NativeRoute.PROFILE) {
                 assertEquals(NativeRoute.HOME, NativeRouteNavigator.backTarget(it))
             }
         }
+    }
+
+    @Test
+    fun profileBackReturnsToSettingsAndKeepsSettingsSelected() {
+        assertEquals(NativeRoute.SETTINGS, NativeRouteNavigator.backTarget(NativeRoute.PROFILE))
+        assertEquals(NativeRoute.PROFILE, NativeRouteNavigator.restoreTarget("PROFILE"))
     }
 
     @Test

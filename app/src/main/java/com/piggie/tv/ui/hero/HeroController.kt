@@ -23,11 +23,13 @@ class HeroController(
     private var state = HeroState(route = route)
     private var lifecycleResumed = false
     private var controlsFocused = false
+    private var presentationPaused = false
     private var pendingFocus: HeroCandidate? = null
     private var lastVisible = false
     private var lastVisibilityScrollSample = Int.MIN_VALUE
 
     private val focusRunnable = Runnable {
+        if (presentationPaused) return@Runnable
         val candidate = pendingFocus ?: return@Runnable
         pendingFocus = null
         val index = state.pool.indexOfFirst { it.item.id == candidate.item.id }
@@ -69,9 +71,25 @@ class HeroController(
 
     fun onItemFocused(candidate: HeroCandidate?) {
         handler.removeCallbacks(focusRunnable)
+        if (presentationPaused) {
+            pendingFocus = null
+            return
+        }
         pendingFocus = candidate?.takeIf { HeroPoolPolicy.accepts(route, it.source, it.item) }
         if (pendingFocus != null) {
             handler.postDelayed(focusRunnable, HeroRotationPolicy.FOCUS_DEBOUNCE_MS)
+        }
+    }
+
+    fun setPresentationPaused(paused: Boolean) {
+        if (route != HeroRoute.HOME || presentationPaused == paused) return
+        presentationPaused = paused
+        if (paused) {
+            handler.removeCallbacks(rotationRunnable)
+            handler.removeCallbacks(focusRunnable)
+            pendingFocus = null
+        } else {
+            scheduleRotation()
         }
     }
 
@@ -154,6 +172,7 @@ class HeroController(
         pendingFocus = null
         lifecycleResumed = false
         controlsFocused = false
+        presentationPaused = false
         candidateBatches.clear()
         state = HeroState(route = route)
         lastVisible = false
@@ -235,7 +254,7 @@ class HeroController(
         }
     }
 
-    private fun canRotate(): Boolean = HeroRotationPolicy.shouldSchedule(
+    private fun canRotate(): Boolean = !presentationPaused && HeroRotationPolicy.shouldSchedule(
         poolSize = state.pool.size,
         visiblePercent = state.visiblePercent,
         lifecycleResumed = lifecycleResumed,

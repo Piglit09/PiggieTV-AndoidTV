@@ -133,7 +133,7 @@ class MusicAndPlaybackTest {
         assertEquals(null, NativeRouteNavigator.backTarget(NativeRoute.HOME))
         assertEquals(NativeRoute.HOME, NativeRouteNavigator.backTarget(NativeRoute.MOVIES))
         assertEquals(NativeRoute.HOME, NativeRouteNavigator.backTarget(NativeRoute.MUSIC))
-        assertEquals(NativeRoute.HOME, NativeRouteNavigator.backTarget(NativeRoute.PROFILE))
+        assertEquals(NativeRoute.SETTINGS, NativeRouteNavigator.backTarget(NativeRoute.PROFILE))
     }
 
     @Test

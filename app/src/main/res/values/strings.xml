@@ -21,12 +21,16 @@
     <string name="native_login_quick_connect_code_label">Use code on PiggieTV or Jellyfin</string>
     <string name="native_login_quick_connect_generate">Generate New Code</string>
     <string name="native_login_quick_connect_cancel">Cancel Quick Connect</string>
+    <string name="native_login_quick_connect_idle">Generate a code to begin Quick Connect.</string>
     <string name="native_login_quick_connect_generating">Generating a secure code...</string>
     <string name="native_login_quick_connect_code_placeholder">------</string>
     <string name="native_login_quick_connect_unavailable">Quick Connect is unavailable right now.</string>
     <string name="native_login_quick_connect_expired">Quick Connect code expired. Generate a new one.</string>
     <string name="native_login_quick_connect_waiting">Waiting for approval. Keep this screen open.</string>
     <string name="native_login_quick_connect_success">Quick Connect authorized. Signing in…</string>
+    <string name="native_login_quick_connect_cancelled">Quick Connect stopped. Generate a new code to try again.</string>
+    <string name="native_login_quick_connect_storage_failed">The secure session could not be saved. Try again.</string>
+    <string name="native_login_quick_connect_server_fallback">Jellyfin server</string>
     <string name="native_login_quick_connect_disabled">Quick Connect is disabled on this server.</string>
     <string name="native_login_quick_connect_denied">Quick Connect request was denied. Generate a new code.</string>
     <string name="native_login_show_password">Show Password</string>

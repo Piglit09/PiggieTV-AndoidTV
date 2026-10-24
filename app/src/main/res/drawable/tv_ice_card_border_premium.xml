@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <stroke android:width="@dimen/ptv_material_border_width" android:color="#7BB9ACF8" />
+            <corners android:radius="@dimen/tv_media_artwork_corner_radius" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <stroke android:width="@dimen/ptv_material_border_width" android:color="#28C9B5FF" />
+            <corners android:radius="@dimen/tv_media_artwork_corner_radius" />
+        </shape>
+    </item>
+</selector>

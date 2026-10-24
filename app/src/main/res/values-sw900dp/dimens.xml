@@ -6,6 +6,7 @@
     <dimen name="tv_header_logo_height">40dp</dimen>
     <dimen name="tv_nav_button_width">92dp</dimen>
     <dimen name="tv_nav_button_height">38dp</dimen>
+    <dimen name="tv_floating_nav_clearance">64dp</dimen>
     <dimen name="tv_poster_width">150dp</dimen>
     <dimen name="tv_poster_height">216dp</dimen>
     <dimen name="tv_landscape_width">280dp</dimen>

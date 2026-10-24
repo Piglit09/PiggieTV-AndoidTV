@@ -42,4 +42,37 @@ class NativeSessionTest {
         assertFalse(NativeSession("t", "s", "u", "n", "ftp://insecure.example").isComplete())
         assertFalse(NativeSession("t", "s", "u", "n", "not a url").isComplete())
     }
+
+    @Test
+    fun stringRepresentationRedactsTokenAndIdentity() {
+        val value = NativeSession(
+            "private-token",
+            "private-server",
+            "private-user",
+            "Private Name",
+            "https://private.example"
+        ).toString()
+
+        assertFalse(value.contains("private-token"))
+        assertFalse(value.contains("private-server"))
+        assertFalse(value.contains("private-user"))
+        assertFalse(value.contains("Private Name"))
+        assertFalse(value.contains("private.example"))
+        assertTrue(value.contains("[REDACTED]"))
+    }
+
+    @Test
+    fun sessionRejectsServerBaseUrlsThatCanContainSecrets() {
+        val session = NativeSession(
+            "token",
+            "server",
+            "user",
+            "Piggie",
+            "https://example.test",
+        )
+
+        assertFalse(session.copy(serverUrl = "https://user:password@example.test").isComplete())
+        assertFalse(session.copy(serverUrl = "https://example.test?api_key=secret").isComplete())
+        assertFalse(session.copy(serverUrl = "https://example.test/#private").isComplete())
+    }
 }

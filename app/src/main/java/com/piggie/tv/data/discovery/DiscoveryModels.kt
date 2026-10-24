@@ -6,7 +6,9 @@ import com.piggie.tv.data.models.MediaItem
 enum class DiscoveryPage {
     HOME,
     MOVIES,
-    SHOWS
+    SHOWS,
+    ANIME,
+    CARTOONS
 }
 
 enum class ShelfStatus {
@@ -92,11 +94,18 @@ data class DiscoveryFilter(
     val value: String? = null
 )
 
+enum class DiscoveryBrowseSort { RECENT, TITLE, RATING }
+
+enum class DiscoveryBrowseWatchFilter { ALL, UNPLAYED, IN_PROGRESS }
+
 data class DiscoveryBrowseRequest(
     val title: String,
     val filter: DiscoveryFilter,
     val itemTypes: List<String> = listOf("Movie", "Series"),
-    val libraryId: String? = null
+    val libraryId: String? = null,
+    val libraryName: String? = null,
+    val sort: DiscoveryBrowseSort = DiscoveryBrowseSort.RECENT,
+    val watchFilter: DiscoveryBrowseWatchFilter = DiscoveryBrowseWatchFilter.ALL
 )
 
 data class ShelfDefinition(

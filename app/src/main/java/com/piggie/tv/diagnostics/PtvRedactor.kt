@@ -4,7 +4,7 @@ import java.net.URI
 
 object PtvRedactor {
     private val assignmentSecret = Regex(
-        "(?i)([\\\"']?(?:api[_-]?key|access[_-]?token|token|password|authorization|" +
+        "(?i)([\\\"']?(?:api[_-]?key|access[_-]?token|token|password|pw|authorization|code|" +
             "quick[_ -]?connect(?:[_ -]?(?:secret|code))?|secret|server[_-]?id|user[_-]?id)[\\\"']?" +
             "\\s*[:=]\\s*)([\\\"']?[^\\s,;}&]+)"
     )
@@ -21,8 +21,10 @@ object PtvRedactor {
 
     fun text(value: String?): String? = value
         ?.let { completeUrl.replace(it) { match -> endpoint(match.value) } }
-        ?.let { assignmentSecret.replace(it) { match -> match.groupValues[1] + "[REDACTED]" } }
+        // Apply this first: a generic Authorization assignment otherwise consumes only the word
+        // "Bearer" and can leave the credential following it untouched.
         ?.let { bearerSecret.replace(it, "Bearer [REDACTED]") }
+        ?.let { assignmentSecret.replace(it) { match -> match.groupValues[1] + "[REDACTED]" } }
         ?.take(MAX_TEXT_LENGTH)
 
     fun identifier(value: String?): String? {
@@ -40,6 +42,7 @@ object PtvRedactor {
         return normalized.contains("token") || normalized.contains("password") ||
             normalized.contains("apikey") || normalized.contains("authorization") ||
             normalized.contains("quickconnect") || normalized == "secret" ||
+            normalized == "pw" || normalized == "code" ||
             normalized == "serverid" || normalized == "userid" ||
             normalized == "body"
     }

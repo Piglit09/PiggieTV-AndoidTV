@@ -13,14 +13,12 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import coil.load
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.models.NativeSession
 import com.piggie.tv.data.session.SecureSessionStore
-import com.piggie.tv.data.discovery.DiscoveryManager
-import com.piggie.tv.data.playback.MusicPlaybackManager
 import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.navigation.NativeRoute
-import com.piggie.tv.ui.player.MediaDetailsSeedStore
 import com.piggie.tv.util.dim
 import com.piggie.tv.util.setTextSizeRes
 import com.piggie.tv.util.sp
@@ -30,12 +28,18 @@ class ProfileFragment : Fragment() {
     private lateinit var session: NativeSession
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        session = (activity as? PtvHostActivity)?.session ?: store.read()!!
+        session = (activity as? PtvHostActivity)?.session
+            ?: requireNotNull(AuthSessionCoordinator.validatedSession(store))
         
         val context = requireContext()
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, context.dim(R.dimen.tv_spacing_large))
+            setPadding(
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_floating_nav_clearance) + context.dim(R.dimen.tv_spacing_medium),
+                context.dim(R.dimen.tv_spacing_large),
+                context.dim(R.dimen.tv_spacing_large)
+            )
         }
 
         root.addView(label("Profile", sp(R.dimen.tv_text_size_page_title), R.color.tv_text_primary, true))
@@ -72,6 +76,7 @@ class ProfileFragment : Fragment() {
         root.addView(userBox)
 
         root.addView(Button(context).apply {
+            id = R.id.ptv_profile_settings_entry
             text = "Settings"
             isAllCaps = false
             setBackgroundResource(R.drawable.tv_button_secondary)
@@ -84,13 +89,7 @@ class ProfileFragment : Fragment() {
             isAllCaps = false
             setBackgroundResource(R.drawable.tv_button_secondary)
             setTextColor(context.getColor(R.color.tv_text_primary))
-            setOnClickListener { 
-                MusicPlaybackManager.shutdown()
-                store.clear()
-                DiscoveryManager.clearForLogout()
-                MediaDetailsSeedStore.clear()
-                activity?.finish()
-            }
+            setOnClickListener { (activity as? PtvHostActivity)?.signOut() }
         }, LinearLayout.LayoutParams(context.dim(R.dimen.tv_hero_button_width), context.dim(R.dimen.tv_nav_button_height) + context.dim(R.dimen.tv_spacing_small)).apply { topMargin = context.dim(R.dimen.tv_spacing_small) })
 
         return root

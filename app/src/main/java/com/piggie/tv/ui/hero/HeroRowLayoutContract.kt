@@ -19,4 +19,13 @@ internal object HeroRowLayoutContract {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, heightPx)
         )
     }
+
+    /** Changes only bounds; the attached Hero, header holder and shelves stay mounted. */
+    fun resize(container: FrameLayout, hero: View, heightPx: Int) {
+        val height = heightPx.coerceAtLeast(0)
+        container.minimumHeight = height
+        container.layoutParams = container.layoutParams.apply { this.height = height }
+        hero.minimumHeight = height
+        hero.layoutParams = hero.layoutParams.apply { this.height = height }
+    }
 }

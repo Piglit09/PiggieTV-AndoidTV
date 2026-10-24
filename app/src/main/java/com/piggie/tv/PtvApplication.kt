@@ -6,18 +6,20 @@ import android.os.Bundle
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.memory.MemoryCache
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.diagnostics.PtvCoilEventListenerFactory
 import com.piggie.tv.diagnostics.PtvDiagnosticsManager
 import com.piggie.tv.diagnostics.PerformanceMonitor
 import com.piggie.tv.core.PtvCoreRuntime
+import com.piggie.tv.data.api.JellyfinImageAuthenticationInterceptor
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.discovery.DiscoveryManager
-import com.piggie.tv.data.playback.PlaybackOriginPolicy
 import com.piggie.tv.data.session.SecureSessionStore
 import com.piggie.tv.memory.MemoryPressurePolicy
 import com.piggie.tv.ui.player.MediaDetailsSeedStore
 import com.piggie.tv.ui.rendering.TvRenderingRuntime
 import com.piggie.tv.util.CrashReporter
+import com.piggie.tv.util.LocalFixtureNetworkGuard
 import okhttp3.OkHttpClient
 
 class PtvApplication : Application(), Application.ActivityLifecycleCallbacks, ImageLoaderFactory {
@@ -90,30 +92,17 @@ class PtvApplication : Application(), Application.ActivityLifecycleCallbacks, Im
      */
     override fun newImageLoader(): ImageLoader {
         val client = OkHttpClient.Builder()
-            .addNetworkInterceptor { chain ->
-                val original = chain.request()
-                val session = sessionStore.read()
-                val request = original.newBuilder()
-                    .removeHeader("Authorization")
-                    .removeHeader("X-Emby-Authorization")
-                    .removeHeader("X-MediaBrowser-Token")
-                    .apply {
-                        if (
-                            session != null &&
-                            PlaybackOriginPolicy.shouldAttachCredentials(
-                                session.serverUrl,
-                                original.url.toString()
-                            )
-                        ) {
-                            val authorization = imageApi.authorization(session.token)
-                            header("Authorization", authorization)
-                            header("X-Emby-Authorization", authorization)
-                            header("X-MediaBrowser-Token", session.token)
-                        }
-                    }
-                    .build()
-                chain.proceed(request)
-            }
+            .addInterceptor(LocalFixtureNetworkGuard)
+            .followRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+            .followSslRedirects(!BuildConfig.LOCAL_FIXTURE_ONLY)
+            .addNetworkInterceptor(
+                JellyfinImageAuthenticationInterceptor(
+                    sessionProvider = {
+                        AuthSessionCoordinator.validatedSession(sessionStore)
+                    },
+                    authorizationProvider = { token -> imageApi.authorization(token) },
+                )
+            )
             .build()
 
         return ImageLoader.Builder(this)

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/ptv_nav_rail_surface" />
+    <stroke android:width="@dimen/ptv_material_border_width" android:color="@color/ptv_nav_rail_border" />
+    <corners android:radius="999dp" />
+</shape>

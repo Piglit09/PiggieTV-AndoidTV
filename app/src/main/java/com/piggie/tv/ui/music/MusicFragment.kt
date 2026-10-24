@@ -12,6 +12,7 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.RecyclerView
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.discovery.DiscoveryDataSource
@@ -91,7 +92,8 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
         signalExecutor = Executors.newFixedThreadPool(4) { runnable ->
             Thread(runnable, "ptv-music-signals")
         }
-        session = (activity as? PtvHostActivity)?.session ?: requireNotNull(store.read())
+        session = (activity as? PtvHostActivity)?.session
+            ?: requireNotNull(AuthSessionCoordinator.validatedSession(store))
         root = FrameLayout(requireContext()).apply {
             setBackgroundColor(PTVColors.background)
             isFocusable = false
@@ -675,13 +677,14 @@ class MusicFragment : Fragment(), HeroRefreshableRoute {
                 is HeroHolder -> {
                     holder.container.removeAllViews()
                     (heroRow.parent as? ViewGroup)?.removeView(heroRow)
-                    holder.container.minimumHeight =
-                        requireContext().dim(R.dimen.tv_hero_height)
+                    val heroHeight = requireContext().dim(R.dimen.tv_hero_height) +
+                        requireContext().dim(R.dimen.tv_floating_nav_clearance)
+                    holder.container.minimumHeight = heroHeight
                     holder.container.addView(
                         heroRow,
                         FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            requireContext().dim(R.dimen.tv_hero_height)
+                            heroHeight
                         )
                     )
                 }

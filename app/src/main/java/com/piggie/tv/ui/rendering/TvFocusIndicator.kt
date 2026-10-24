@@ -36,7 +36,10 @@ internal object MediaCardFocusBorderStyle {
  * Retains the diagonal shader while the overlay moves between equal-sized cards. Each shelf owns
  * one overlay, so normal horizontal traversal creates the shader once rather than once per focus.
  */
-internal class FocusGradientShaderCache {
+internal class FocusGradientShaderCache(
+    private val startColor: Int = MediaCardFocusBorderStyle.gradientStartColor,
+    private val endColor: Int = MediaCardFocusBorderStyle.gradientEndColor
+) {
     private var width = -1
     private var height = -1
     private var shader: Shader? = null
@@ -51,8 +54,8 @@ internal class FocusGradientShaderCache {
                 0f,
                 width.toFloat(),
                 height.toFloat(),
-                MediaCardFocusBorderStyle.gradientStartColor,
-                MediaCardFocusBorderStyle.gradientEndColor,
+                startColor,
+                endColor,
                 Shader.TileMode.CLAMP
             )
         }
@@ -61,22 +64,42 @@ internal class FocusGradientShaderCache {
 }
 
 /** A transparent, border-only focus ring matching the media artwork's rounded outline. */
-internal class FocusBorderDrawable(resources: Resources) : Drawable() {
-    private val strokeWidth = resources.getDimensionPixelSize(R.dimen.tv_focus_border_width).toFloat()
+internal class FocusBorderDrawable(resources: Resources, premium: Boolean = false) : Drawable() {
+    private var premiumStyle = premium
+    private val legacyStrokeWidth = resources.getDimensionPixelSize(R.dimen.tv_focus_border_width).toFloat()
+    private val premiumStrokeWidth = resources.getDimensionPixelSize(R.dimen.ptv_focus_outer_border_width).toFloat()
+    private val innerStrokeWidth = resources.getDimensionPixelSize(R.dimen.ptv_focus_inner_border_width).toFloat()
     private val cornerRadius = resources.getDimension(R.dimen.tv_media_artwork_corner_radius)
     private val localBounds = RectF()
+    private val innerBounds = RectF()
     private val shaderCache = FocusGradientShaderCache()
+    private val premiumShaderCache = FocusGradientShaderCache(
+        resources.getColor(R.color.ptv_focus_violet, null),
+        resources.getColor(R.color.ptv_focus_cyan, null)
+    )
+    private var drawableAlpha = 255
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = this@FocusBorderDrawable.strokeWidth
+        strokeWidth = if (premium) premiumStrokeWidth else legacyStrokeWidth
+    }
+    private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = innerStrokeWidth
+        color = resources.getColor(R.color.ptv_focus_pale, null)
     }
 
     override fun onBoundsChange(bounds: Rect) {
         super.onBoundsChange(bounds)
+        updateGeometry(bounds)
+    }
+
+    private fun updateGeometry(bounds: Rect) {
         if (bounds.isEmpty) {
             localBounds.setEmpty()
+            innerBounds.setEmpty()
             return
         }
+        val strokeWidth = if (premiumStyle) premiumStrokeWidth else legacyStrokeWidth
         val inset = strokeWidth / 2f
         localBounds.set(
             inset,
@@ -84,22 +107,51 @@ internal class FocusBorderDrawable(resources: Resources) : Drawable() {
             bounds.width().toFloat() - inset,
             bounds.height().toFloat() - inset
         )
-        paint.shader = shaderCache.shaderFor(bounds.width(), bounds.height())
+        val innerInset = strokeWidth + innerStrokeWidth / 2f
+        innerBounds.set(
+            innerInset,
+            innerInset,
+            bounds.width().toFloat() - innerInset,
+            bounds.height().toFloat() - innerInset
+        )
+        paint.strokeWidth = strokeWidth
+        paint.shader = if (premiumStyle) {
+            premiumShaderCache.shaderFor(bounds.width(), bounds.height())
+        } else {
+            shaderCache.shaderFor(bounds.width(), bounds.height())
+        }
+        paint.alpha = if (premiumStyle) (drawableAlpha * 120 / 255) else drawableAlpha
+        innerPaint.alpha = if (premiumStyle) (drawableAlpha * 230 / 255) else drawableAlpha
     }
 
     override fun draw(canvas: Canvas) {
         if (bounds.isEmpty) return
         canvas.withTranslation(bounds.left.toFloat(), bounds.top.toFloat()) {
             drawRoundRect(localBounds, cornerRadius, cornerRadius, paint)
+            if (premiumStyle && innerBounds.width() > 0f && innerBounds.height() > 0f) {
+                val innerRadius = (cornerRadius - premiumStrokeWidth).coerceAtLeast(0f)
+                drawRoundRect(innerBounds, innerRadius, innerRadius, innerPaint)
+            }
         }
     }
 
+    fun usePremiumStyle(enabled: Boolean): Boolean {
+        if (premiumStyle == enabled) return false
+        premiumStyle = enabled
+        updateGeometry(bounds)
+        invalidateSelf()
+        return true
+    }
+
     override fun setAlpha(alpha: Int) {
-        paint.alpha = alpha
+        drawableAlpha = alpha
+        paint.alpha = if (premiumStyle) (alpha * 120 / 255) else alpha
+        innerPaint.alpha = if (premiumStyle) (alpha * 230 / 255) else alpha
     }
 
     override fun setColorFilter(colorFilter: ColorFilter?) {
         paint.colorFilter = colorFilter
+        innerPaint.colorFilter = colorFilter
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
@@ -131,10 +183,14 @@ class FocusOverlayState {
  */
 object TvFocusIndicator {
     private val overlayControllers = WeakHashMap<RecyclerView, OverlayController>()
+    private val premiumFocusViews = WeakHashMap<View, Boolean>()
 
-    fun registerArtwork(focusable: View, artwork: View) {
+    fun registerArtwork(focusable: View, artwork: View, premiumFocus: Boolean = false) {
         focusable.setTag(R.id.focus_artwork_view, artwork)
+        premiumFocusViews[focusable] = premiumFocus
     }
+
+    internal fun isPremiumFocus(view: View): Boolean = premiumFocusViews[view] == true
 
     fun onFocusChanged(view: View, focused: Boolean) {
         val recycler = findRecyclerAncestor(view) ?: return
@@ -217,6 +273,7 @@ object TvFocusIndicator {
             val recycler = recyclerRef.get() ?: return
             val artwork = registeredArtwork(view)
             if (!artwork.isAttachedToWindow || artwork.width <= 0 || artwork.height <= 0) return
+            val materialChanged = border.usePremiumStyle(isPremiumFocus(view))
             nextBounds.set(0, 0, artwork.width, artwork.height)
             recycler.offsetDescendantRectToMyCoords(artwork, nextBounds)
             val key = viewKey(view)
@@ -226,7 +283,7 @@ object TvFocusIndicator {
                     FocusOverlayBounds(nextBounds.left, nextBounds.top, nextBounds.right, nextBounds.bottom)
                 )
             }
-            if (lastBounds != nextBounds) {
+            if (lastBounds != nextBounds || materialChanged) {
                 invalidBounds.set(lastBounds)
                 invalidBounds.union(nextBounds)
                 lastBounds.set(nextBounds)

@@ -13,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import coil.load
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.models.MediaCardPresentation
 import com.piggie.tv.data.playback.MusicPlaybackManager
@@ -82,7 +83,7 @@ class NowPlayingActivity : AppCompatActivity() {
                     title.text = item.title
                     artist.text = item.artists.firstOrNull() ?: item.albumArtist
                     val store = SecureSessionStore(this@NowPlayingActivity)
-                    val session = store.read() ?: run {
+                    val session = AuthSessionCoordinator.validatedSession(store) ?: run {
                         finish()
                         return@collectLatest
                     }

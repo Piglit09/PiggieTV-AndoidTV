@@ -282,13 +282,14 @@ class NativeHttpTransport internal constructor(
     }
 
     fun download(endpoint: String, token: String?, action: (java.io.InputStream) -> Unit) {
-        download(endpoint, token, null, action)
+        download(endpoint, token, null, action = action)
     }
 
     fun download(
         endpoint: String,
         token: String?,
         requestScope: NativeRequestScope?,
+        onHttpFailure: (Int) -> Unit = {},
         action: (java.io.InputStream) -> Unit
     ) {
         val endpointUrl = requireNotNull(endpoint.toHttpUrlOrNull()) { "Invalid endpoint URL" }
@@ -314,7 +315,11 @@ class NativeHttpTransport internal constructor(
 
         try {
             call.execute().use { response ->
-                if (!response.isSuccessful) throw HttpRequestFailure(response.code, response.body?.string().orEmpty())
+                if (!response.isSuccessful) {
+                    onHttpFailure(response.code)
+                    // Binary error payloads are neither needed nor retained by the auth path.
+                    throw HttpRequestFailure(response.code, "")
+                }
                 response.body?.byteStream()?.use(action) ?: throw IOException("Empty response body")
             }
         } catch (error: Throwable) {

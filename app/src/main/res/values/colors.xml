@@ -20,5 +20,38 @@
     <color name="tv_panel_bg_fallback">#331A4D</color>
     <color name="tv_panel_border">#442266</color>
 
+    <!-- Premium UI 2.0: static cinematic foundations and semantic Glass 0-4. -->
+    <color name="ptv_cinema_ink">#050912</color>
+    <color name="ptv_cinema_navy">#0B1020</color>
+    <color name="ptv_focus_pale">#F8F6FF</color>
+    <color name="ptv_focus_violet">#A78BFA</color>
+    <color name="ptv_focus_cyan">#6DDEE9</color>
+    <color name="ptv_nav_rail_surface">#2E1D1330</color>
+    <color name="ptv_nav_rail_fallback">#70241938</color>
+    <color name="ptv_nav_rail_border">#52C9B5FF</color>
+    <color name="ptv_card_footer_idle">#4D1B1130</color>
+    <color name="ptv_card_footer_focused">#A01B1130</color>
+
+    <color name="ptv_glass_0_surface">#00000000</color>
+    <color name="ptv_glass_0_fallback">#00000000</color>
+    <color name="ptv_glass_0_border">#00000000</color>
+    <color name="ptv_glass_0_highlight">#00000000</color>
+    <color name="ptv_glass_1_surface">#5223123D</color>
+    <color name="ptv_glass_1_fallback">#B8291954</color>
+    <color name="ptv_glass_1_border">#4DC9B5FF</color>
+    <color name="ptv_glass_1_highlight">#29F8F6FF</color>
+    <color name="ptv_glass_2_surface">#7A1B1130</color>
+    <color name="ptv_glass_2_fallback">#C7351F53</color>
+    <color name="ptv_glass_2_border">#38C9B5FF</color>
+    <color name="ptv_glass_2_highlight">#1AF8F6FF</color>
+    <color name="ptv_glass_3_surface">#9E22123A</color>
+    <color name="ptv_glass_3_fallback">#E045236A</color>
+    <color name="ptv_glass_3_border">#66C9B5FF</color>
+    <color name="ptv_glass_3_highlight">#33F8F6FF</color>
+    <color name="ptv_glass_4_surface">#DF2C1746</color>
+    <color name="ptv_glass_4_fallback">#F73A1F59</color>
+    <color name="ptv_glass_4_border">#73C9B5FF</color>
+    <color name="ptv_glass_4_highlight">#2EF8F6FF</color>
+
     <color name="ic_launcher_background">#0F041C</color>
 </resources>

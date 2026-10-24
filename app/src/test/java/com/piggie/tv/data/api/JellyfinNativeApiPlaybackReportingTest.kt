@@ -1,13 +1,16 @@
 package com.piggie.tv.data.api
 
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.data.models.NativeSession
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -23,12 +26,16 @@ class JellyfinNativeApiPlaybackReportingTest {
 
     @Before
     fun setUp() {
+        AuthSessionCoordinator.resetForTests()
+        cancelPendingPlaybackReports()
         server = MockWebServer()
         server.start()
     }
 
     @After
     fun tearDown() {
+        AuthSessionCoordinator.resetForTests()
+        cancelPendingPlaybackReports()
         server.shutdown()
     }
 
@@ -43,6 +50,7 @@ class JellyfinNativeApiPlaybackReportingTest {
             serverUrl = server.url("/").toString().trimEnd('/')
         )
         val api = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+        validate(session)
         val stopped = CountDownLatch(1)
         var stoppedSucceeded = false
 
@@ -93,6 +101,7 @@ class JellyfinNativeApiPlaybackReportingTest {
             serverUrl = server.url("/").toString().trimEnd('/')
         )
         val api = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+        validate(session)
         val completed = CountDownLatch(1)
 
         api.reportPlaying(session, "movie", "slow-play", 0L)
@@ -124,6 +133,7 @@ class JellyfinNativeApiPlaybackReportingTest {
         )
         val completed = CountDownLatch(1)
         var success = true
+        validate(session)
 
         JellyfinNativeApi(RuntimeEnvironment.getApplication()).reportStopped(
             session,
@@ -141,6 +151,114 @@ class JellyfinNativeApiPlaybackReportingTest {
     }
 
     @Test
+    fun `logout cancels a playback report already waiting on transport`() {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val session = NativeSession(
+            token = "token",
+            serverId = "server",
+            userId = "user",
+            userName = "Viewer",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+        val completed = CountDownLatch(1)
+        var success = true
+        validate(session)
+
+        JellyfinNativeApi(RuntimeEnvironment.getApplication()).reportStopped(
+            session,
+            "movie",
+            "play-1",
+            130_000L
+        ) { result ->
+            success = result
+            completed.countDown()
+        }
+        requireNotNull(server.takeRequest(1, TimeUnit.SECONDS))
+
+        AuthSessionCoordinator.invalidateAll()
+        cancelPendingPlaybackReports()
+
+        assertTrue("Active report was not cancelled", completed.await(2, TimeUnit.SECONDS))
+        assertEquals(false, success)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `authenticated 401 publishes rejection for the current credential`() {
+        server.enqueue(MockResponse().setResponseCode(401))
+        val session = NativeSession(
+            token = "token",
+            serverId = "server",
+            userId = "user",
+            userName = "Viewer",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+        validate(session)
+        val rejected = CountDownLatch(1)
+        val listener: (com.piggie.tv.auth.AuthenticationRejection) -> Unit = {
+            if (AuthSessionCoordinator.rejectionMatches(it, session)) rejected.countDown()
+        }
+        AuthSessionCoordinator.addAuthenticationRejectionListener(listener)
+
+        runCatching {
+            JellyfinNativeApi(RuntimeEnvironment.getApplication()).validateSession(session)
+        }
+
+        assertTrue("Authenticated 401 was not published", rejected.await(1, TimeUnit.SECONDS))
+        AuthSessionCoordinator.removeAuthenticationRejectionListener(listener)
+    }
+
+    @Test
+    fun `reading progress is not sent after authentication is invalidated`() {
+        val session = NativeSession(
+            token = "token",
+            serverId = "server",
+            userId = "user",
+            userName = "Viewer",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+        validate(session)
+        AuthSessionCoordinator.invalidateAll()
+
+        JellyfinNativeApi(RuntimeEnvironment.getApplication()).reportReadingProgress(
+            session,
+            "book",
+            12,
+        )
+
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `reading shelves stop issuing requests after logout`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("{\"Items\":[]}")
+                .setBodyDelay(300, TimeUnit.MILLISECONDS)
+        )
+        val session = NativeSession(
+            token = "token",
+            serverId = "server",
+            userId = "user",
+            userName = "Viewer",
+            serverUrl = server.url("/").toString().trimEnd('/')
+        )
+        validate(session)
+        val completed = CountDownLatch(1)
+
+        Thread {
+            JellyfinNativeApi(RuntimeEnvironment.getApplication())
+                .loadReadingHomeIncrementally(session) {}
+            completed.countDown()
+        }.start()
+        requireNotNull(server.takeRequest(1, TimeUnit.SECONDS))
+        AuthSessionCoordinator.invalidateAll()
+
+        assertTrue(completed.await(2, TimeUnit.SECONDS))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
     fun `failed old stop retries before a new session starts`() {
         server.enqueue(MockResponse().setResponseCode(500).setBody("retry"))
         server.enqueue(MockResponse().setResponseCode(204))
@@ -153,6 +271,7 @@ class JellyfinNativeApiPlaybackReportingTest {
             serverUrl = server.url("/").toString().trimEnd('/')
         )
         val api = JellyfinNativeApi(RuntimeEnvironment.getApplication())
+        validate(session)
         val stopped = CountDownLatch(1)
 
         api.reportStopped(session, "old-movie", "old-play", 100L) {
@@ -172,5 +291,10 @@ class JellyfinNativeApiPlaybackReportingTest {
             ),
             requests.map { it.requestUrl?.encodedPath }
         )
+    }
+
+    private fun validate(session: NativeSession) {
+        val attempt = AuthSessionCoordinator.beginAttempt()
+        assertTrue(AuthSessionCoordinator.commitAuthenticated(attempt, session) { true })
     }
 }

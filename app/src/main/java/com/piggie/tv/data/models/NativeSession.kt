@@ -17,6 +17,14 @@ data class NativeSession(
             userId.isNotBlank() &&
             userName.isNotBlank() &&
             server != null &&
-            (server.isHttps || server.scheme == "http")
+            (server.isHttps || server.scheme == "http") &&
+            server.username.isEmpty() &&
+            server.password.isEmpty() &&
+            server.query == null &&
+            server.fragment == null
     }
+
+    /** Prevent generated data-class output from disclosing the access token or user identity. */
+    override fun toString(): String =
+        "NativeSession(token=[REDACTED], identity=[REDACTED], isAdministrator=$isAdministrator)"
 }

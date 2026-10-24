@@ -41,6 +41,7 @@ import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.piggie.tv.R
+import com.piggie.tv.auth.AuthSessionCoordinator
 import com.piggie.tv.core.PtvHostActivity
 import com.piggie.tv.data.api.JellyfinNativeApi
 import com.piggie.tv.data.api.NativeRequestScope
@@ -263,7 +264,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         )
 
         MusicPlaybackManager.stop()
-        session = store.read() ?: run { finish(); return }
+        session = AuthSessionCoordinator.validatedSession(store) ?: run { finish(); return }
         itemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: run { finish(); return }
         explicitEpisodeQueue = intent.getStringArrayListExtra(EXTRA_EPISODE_QUEUE_IDS)
             ?.map(String::trim)
@@ -365,6 +366,9 @@ class VideoPlayerActivity : AppCompatActivity() {
 
     private fun createSinglePlayer() {
         val client = OkHttpClient.Builder()
+            .addInterceptor(com.piggie.tv.util.LocalFixtureNetworkGuard)
+            .followRedirects(!com.piggie.tv.BuildConfig.LOCAL_FIXTURE_ONLY)
+            .followSslRedirects(!com.piggie.tv.BuildConfig.LOCAL_FIXTURE_ONLY)
             .addNetworkInterceptor { chain ->
                 val original = chain.request()
                 val request = original.newBuilder()

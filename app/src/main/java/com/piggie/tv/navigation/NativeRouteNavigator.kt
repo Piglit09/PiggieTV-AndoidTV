@@ -4,6 +4,9 @@ object NativeRouteNavigator {
     fun restoreTarget(savedName: String?): NativeRoute =
         NativeRoute.entries.firstOrNull { it.name == savedName } ?: NativeRoute.HOME
 
+    fun navigationSelection(route: NativeRoute): NativeRoute =
+        if (route == NativeRoute.PROFILE) NativeRoute.SETTINGS else route
+
     /**
      * A same-route selection can refresh in place only after a route Fragment is actually
      * attached. In particular, two absent references must not compare as a reusable route during
@@ -28,8 +31,8 @@ object NativeRouteNavigator {
         NativeRoute.SHOWS,
         NativeRoute.MUSIC,
         NativeRoute.SEARCH,
-        NativeRoute.SETTINGS,
-        NativeRoute.PROFILE -> NativeRoute.HOME
+        NativeRoute.SETTINGS -> NativeRoute.HOME
+        NativeRoute.PROFILE -> NativeRoute.SETTINGS
     }
 
     /**

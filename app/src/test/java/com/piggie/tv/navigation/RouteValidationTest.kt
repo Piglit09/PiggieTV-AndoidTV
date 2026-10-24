@@ -17,6 +17,8 @@ class RouteValidationTest {
             val target = NativeRouteNavigator.backTarget(route)
             if (route == NativeRoute.HOME) {
                 assertNull(target)
+            } else if (route == NativeRoute.PROFILE) {
+                assertEquals(NativeRoute.SETTINGS, target)
             } else {
                 assertEquals(NativeRoute.HOME, target)
             }
